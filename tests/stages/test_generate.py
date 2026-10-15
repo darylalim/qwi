@@ -13,6 +13,7 @@ from qwi.errors import DeviceOutOfMemory
 from qwi.stages.generate import Generate
 
 MFLUX_MODULE = "mflux.models.qwen21.variants.txt2img.qwen_image_21"
+ENCODER_MODULE = "mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder"
 
 
 class FakeRegistry:
@@ -29,6 +30,9 @@ class FakeQwenImage21:
     def __init__(self, model_path: str) -> None:
         self.model_path = model_path
         self.callbacks = FakeRegistry()
+        self.tokenizers = {"qwen21": "tokenizer"}
+        self.text_encoder: object | None = "encoder"
+        self.prompt_cache: dict[str, tuple[object, object]] = {}
         self.calls: list[dict[str, Any]] = []
         FakeQwenImage21.instances.append(self)
 
@@ -49,16 +53,39 @@ class FakeQwenImage21:
         return SimpleNamespace(image=Image.new("RGB", (width, height)))
 
 
+class FakePromptEncoder:
+    """mflux's recipe as far as caching goes: an empty prompt is encoded as " "."""
+
+    @staticmethod
+    def encode_prompt(
+        prompt: str, prompt_cache: dict, tokenizer: object, text_encoder: object
+    ) -> tuple[str, str]:
+        assert text_encoder == "encoder"
+        key = prompt if prompt.strip() else " "
+        prompt_cache[key] = (f"embeds:{key}", f"mask:{key}")
+        return prompt_cache[key]
+
+
+@pytest.fixture
+def mlx_calls() -> list[str]:
+    return []
+
+
 @pytest.fixture(autouse=True)
-def fake_mflux(monkeypatch: pytest.MonkeyPatch) -> None:
+def fake_mflux(monkeypatch: pytest.MonkeyPatch, mlx_calls: list[str]) -> None:
     import mlx.core as mx
 
     module = ModuleType(MFLUX_MODULE)
     module.QwenImage21 = FakeQwenImage21  # ty: ignore[unresolved-attribute]  # test fake
     monkeypatch.setitem(sys.modules, MFLUX_MODULE, module)
+    encoder_module = ModuleType(ENCODER_MODULE)
+    encoder_module.Qwen21PromptEncoder = FakePromptEncoder  # ty: ignore[unresolved-attribute]  # test fake
+    monkeypatch.setitem(sys.modules, ENCODER_MODULE, encoder_module)
     FakeQwenImage21.instances = []
-    for name in ("set_cache_limit", "clear_cache", "reset_peak_memory"):
+    for name in ("set_cache_limit", "reset_peak_memory"):
         monkeypatch.setattr(mx, name, lambda *_: None)
+    monkeypatch.setattr(mx, "clear_cache", lambda: mlx_calls.append("clear_cache"))
+    monkeypatch.setattr(mx, "eval", lambda *arrays: mlx_calls.append(f"eval{arrays}"))
     monkeypatch.setattr(mx, "get_peak_memory", lambda: 13_000_000_000)
 
 
@@ -122,3 +149,30 @@ def test_unload_drops_the_model() -> None:
     stage.unload()
     with pytest.raises(RuntimeError, match="load"):
         list(stage("p", [0]))
+
+
+def test_encode_caches_the_embeddings_then_evicts_the_encoder(mlx_calls: list[str]) -> None:
+    stage = Generate(Path("/w"))
+    stage.load()
+    embeds = stage.encode("a red apple")
+    model = FakeQwenImage21.instances[0]
+    assert model.text_encoder is None
+    assert model.prompt_cache == {"a red apple": ("embeds:a red apple", "mask:a red apple")}
+    assert (embeds.prompt, embeds.encoder) == ("a red apple", "A-q4")
+    # evaluated before the eviction frees the weights (§4)
+    assert mlx_calls == ["eval('embeds:a red apple', 'mask:a red apple')", "clear_cache"]
+
+
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_encode_keys_an_empty_prompt_by_the_exact_string(prompt: str) -> None:
+    # mflux encodes "" as " " but looks up "": without the exact key the lookup would miss and
+    # call the evicted encoder.
+    stage = Generate(Path("/w"))
+    stage.load()
+    stage.encode(prompt)
+    assert prompt in FakeQwenImage21.instances[0].prompt_cache
+
+
+def test_encode_before_load_is_an_error() -> None:
+    with pytest.raises(RuntimeError, match="load"):
+        Generate(Path("/w")).encode("p")

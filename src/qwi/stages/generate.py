@@ -1,7 +1,8 @@
-"""Stage 4: Qwen-Image-2.1 via mflux `QwenImage21`, one image per seed (PLAN.md §1, §4).
+"""Stages 3-4: Qwen-Image-2.1 via mflux `QwenImage21`, one image per seed (PLAN.md §1, §3, §4).
 
-Seeds run in sequence on one loaded model. mflux caches the prompt's embeddings in
-`model.prompt_cache` on the first seed, so later seeds skip the encoder.
+`encode()` computes the prompt's embeddings once with the pack's own encoder (option A), caches
+them in `model.prompt_cache`, and evicts the encoder before denoising: stock mflux would keep it
+resident (≈ 4 GB at q4, §8). Seeds then run in sequence on one loaded model, all from the cache.
 """
 
 import time
@@ -14,6 +15,7 @@ from PIL.Image import Image
 
 from qwi import memory
 from qwi.config import DEFAULTS
+from qwi.stages.encode import PromptEmbeds
 
 if TYPE_CHECKING:
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
@@ -56,6 +58,33 @@ class Generate:
             model.callbacks.register(callback)
         self._model = model
 
+    def encode(self, prompt: str, encoder: str = "A-q4") -> PromptEmbeds:
+        """Encode `prompt` with mflux's recipe, cache it, then evict the text encoder (§4)."""
+        import mlx.core as mx
+        from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder import (
+            Qwen21PromptEncoder,
+        )
+
+        model = self._require()
+        embeds, mask = Qwen21PromptEncoder.encode_prompt(
+            prompt=prompt,
+            prompt_cache={},
+            tokenizer=model.tokenizers["qwen21"],
+            text_encoder=model.text_encoder,
+        )
+        mx.eval(embeds, mask)  # materialize first, so evicting frees the weights now (§4)
+        # Keyed by the exact prompt: mflux encodes an empty prompt as " " but looks up the
+        # original string, which would miss and call the evicted encoder.
+        model.prompt_cache[prompt] = (embeds, mask)
+        model.text_encoder = None  # ty: ignore[invalid-assignment]  # evict (mflux types it non-None)
+        memory.evict()
+        return PromptEmbeds(prompt, embeds, mask, encoder)
+
+    def _require(self) -> "QwenImage21":
+        if self._model is None:
+            raise RuntimeError("Generate.load() was not called")
+        return self._model
+
     def __call__(
         self,
         prompt: str,
@@ -66,14 +95,13 @@ class Generate:
         steps: int = DEFAULTS.steps,
     ) -> Generator[Candidate]:
         """Yield each candidate as soon as it's decoded, so callers can save it and stop early."""
-        if self._model is None:
-            raise RuntimeError("Generate.load() was not called")
+        model = self._require()
         for seed in seeds:
             if self.watchdog is not None:
                 self.watchdog.check()  # swap since the last step hook (load, or the last decode)
             started = time.perf_counter()
             with memory.track_peak() as peak:
-                image = self._model.generate_image(
+                image = model.generate_image(
                     seed=seed,
                     prompt=prompt,
                     num_inference_steps=steps,
