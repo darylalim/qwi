@@ -2,6 +2,7 @@
 
 import csv
 import json
+import re
 import threading
 from collections.abc import Sequence
 from datetime import date
@@ -182,10 +183,15 @@ def test_a_failure_mid_run_keeps_rows_and_logs_the_error(r: Runner) -> None:
 runner = CliRunner()
 
 
+def plain(text: str) -> str:
+    """Drop ANSI styling: CI advertises color, so Rich splits option names with escape codes."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 def test_cli_requires_a_variant() -> None:
     result = runner.invoke(cli.app, ["eval"])
     assert result.exit_code == 2
-    assert "--variant is required" in result.output
+    assert "--variant is required" in plain(result.output)
 
 
 def test_cli_runs_the_eval_and_reports_paths(monkeypatch: pytest.MonkeyPatch) -> None:
