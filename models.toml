@@ -1,6 +1,6 @@
 # Model roles, pinned to exact snapshots (PLAN.md §5.7) with their licenses (§5.10).
 # Loaders pass `revision=`. Any change here needs an eval re-run (§5.4 "Re-run triggers").
-# The `image` role (Qwen-Image-2.1) is added in M0b, once the weight source is chosen.
+# `image` is the pre-quantized q4 pack, loaded with QwenImage21(model_path=<snapshot>) (§5.7 option 1, chosen in M0b).
 
 [licenses."apache-2.0"]
 name = "Apache License 2.0"
@@ -24,3 +24,8 @@ license = "apache-2.0"
 repo = "mlx-community/Qwen3-VL-Reranker-2B-8bit"
 revision = "e9cd8bbefa68882550b30cfe1c9905b882965888"
 license = "apache-2.0"
+
+[roles.image]
+repo = "mlx-community/Qwen-Image-2.1-mflux-q4"
+revision = "746a58556820933a2df5c75887a2570f1ad200c0"
+license = "qwen-research"
