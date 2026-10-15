@@ -1,0 +1,6 @@
+qwi — Copyright 2026 Daryl Lim. Licensed under the Apache License 2.0.
+
+This repository and its releases contain no model weights. Models are downloaded
+separately and remain under their own licenses (see README → Model licenses).
+Qwen-Image-2.1 is licensed under the Qwen Research License, which limits use to
+research and non-commercial purposes; this applies to images generated with it.
