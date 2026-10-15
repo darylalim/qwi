@@ -90,3 +90,23 @@ def test_messages_carry_the_plan_actions() -> None:
     assert "512²" in str(errors.InsufficientMemory("generate", 30.0, 22.9))
     assert "qwi models fetch image" in str(errors.ModelUnavailable("image", "missing"))
     assert "started 2026-10-15T09:30:05" in str(errors.PipelineBusy("2026-10-15T09:30:05"))
+
+
+def test_keyboard_interrupt_is_cancelled() -> None:
+    assert isinstance(errors.classify(KeyboardInterrupt(), "generate"), errors.GenerationCancelled)
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type", "code"),
+    [
+        ("ok", None, 0),
+        ("cancelled", None, 130),
+        ("blocked", None, 2),
+        ("error", "SwapRisk", 4),
+        ("error", "ModelUnavailable", 5),
+        ("error", "ValueError", 1),
+        ("interrupted", None, 1),
+    ],
+)
+def test_exit_code_for_a_finished_record(status: str, error_type: str | None, code: int) -> None:
+    assert errors.exit_code_for(status, error_type) == code

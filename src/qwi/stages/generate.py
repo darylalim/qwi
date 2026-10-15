@@ -5,7 +5,7 @@ Seeds run in sequence on one loaded model. mflux caches the prompt's embeddings 
 """
 
 import time
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,8 +31,8 @@ class Generate:
     """Loads `QwenImage21` from a local weight snapshot and generates one candidate per seed.
 
     `callbacks` are mflux hooks (`call_in_loop`, ...) registered on load, such as a
-    `memory.SwapWatchdog`. A watchdog is also checked after each image, because the VAE decode
-    runs after the last step hook.
+    `memory.SwapWatchdog`. A watchdog is also checked before each seed: the VAE decode runs after
+    the last step hook, so swap there stops the next seed while the decoded image is still kept.
     """
 
     def __init__(
@@ -64,11 +64,13 @@ class Generate:
         width: int = DEFAULTS.width,
         height: int = DEFAULTS.height,
         steps: int = DEFAULTS.steps,
-    ) -> list[Candidate]:
+    ) -> Generator[Candidate]:
+        """Yield each candidate as soon as it's decoded, so callers can save it and stop early."""
         if self._model is None:
             raise RuntimeError("Generate.load() was not called")
-        candidates: list[Candidate] = []
         for seed in seeds:
+            if self.watchdog is not None:
+                self.watchdog.check()  # swap since the last step hook (load, or the last decode)
             started = time.perf_counter()
             with memory.track_peak() as peak:
                 image = self._model.generate_image(
@@ -78,10 +80,7 @@ class Generate:
                     width=width,
                     height=height,
                 ).image
-            if self.watchdog is not None:
-                self.watchdog.check()
-            candidates.append(Candidate(seed, image, time.perf_counter() - started, peak.gb))
-        return candidates
+            yield Candidate(seed, image, time.perf_counter() - started, peak.gb)
 
     def unload(self) -> None:
         self._model = None

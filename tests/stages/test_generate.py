@@ -65,7 +65,7 @@ def fake_mflux(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_generates_one_candidate_per_seed_in_order() -> None:
     stage = Generate(Path("/weights/q4"))
     stage.load()
-    candidates = stage("a red apple", [7, 8, 9], width=256, height=128, steps=2)
+    candidates = list(stage("a red apple", [7, 8, 9], width=256, height=128, steps=2))
 
     model = FakeQwenImage21.instances[0]
     assert model.model_path == "/weights/q4"
@@ -84,7 +84,7 @@ def test_generates_one_candidate_per_seed_in_order() -> None:
 def test_defaults_come_from_config() -> None:
     stage = Generate(Path("/weights/q4"))
     stage.load()
-    stage("p", [0])
+    list(stage("p", [0]))
     call = FakeQwenImage21.instances[0].calls[0]
     assert (call["width"], call["height"], call["num_inference_steps"]) == (768, 768, 20)
 
@@ -99,19 +99,21 @@ def test_registers_callbacks_and_the_watchdog() -> None:
 
 def test_watchdog_stops_the_remaining_seeds_after_a_swapping_decode() -> None:
     # Swap that happens after the last step hook (the VAE decode) is caught before the next seed.
-    swap = iter([0, 0, 10**10])  # start, step hook of seed 0, post-image check of seed 0
+    swap = iter([0, 0, 0, 10**10])  # start, pre-seed 0 check, seed 0 step hook, pre-seed 1
     watchdog = memory.SwapWatchdog("generate", limit_bytes=1, read=lambda: next(swap))
     watchdog.start()
     stage = Generate(Path("/w"), watchdog=watchdog)
     stage.load()
+    candidates = stage("p", [0, 1, 2])
+    assert next(candidates).seed == 0  # the swap is found after seed 0 is decoded and yielded
     with pytest.raises(DeviceOutOfMemory):
-        stage("p", [0, 1, 2])
+        next(candidates)
     assert len(FakeQwenImage21.instances[0].calls) == 1
 
 
 def test_call_before_load_is_an_error() -> None:
     with pytest.raises(RuntimeError, match="load"):
-        Generate(Path("/w"))("p", [0])
+        list(Generate(Path("/w"))("p", [0]))
 
 
 def test_unload_drops_the_model() -> None:
@@ -119,4 +121,4 @@ def test_unload_drops_the_model() -> None:
     stage.load()
     stage.unload()
     with pytest.raises(RuntimeError, match="load"):
-        stage("p", [0])
+        list(stage("p", [0]))
