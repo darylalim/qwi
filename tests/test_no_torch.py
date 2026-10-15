@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 import qwi  # noqa: F401  # forces HF_HUB_OFFLINE=1 before huggingface_hub is imported
+from qwi import memory
+from qwi.config import DEFAULTS
+from qwi.stages.generate import Generate
 
 from .conftest import ROOT
 
 pytestmark = pytest.mark.slow
-
-CACHE_LIMIT = 2 * 2**30  # PLAN.md §4; the runtime takes it from config.py once M1 adds it
 
 
 def snapshot(role: str) -> Path:
@@ -37,7 +38,7 @@ def assert_torch_free() -> None:
 def mlx_memory() -> Iterator[None]:
     import mlx.core as mx
 
-    mx.set_cache_limit(CACHE_LIMIT)
+    mx.set_cache_limit(DEFAULTS.cache_limit_bytes)
     yield
     gc.collect()
     mx.clear_cache()
@@ -76,4 +77,19 @@ def test_qwen_image_generates() -> None:
         seed=0, prompt="a red apple", num_inference_steps=2, width=256, height=256
     ).image
     assert (image.size, image.mode) == ((256, 256), "RGB")
+    assert_torch_free()
+
+
+def test_generate_stage_runs_two_seeds() -> None:
+    watchdog = memory.SwapWatchdog("generate")
+    watchdog.start()
+    stage = Generate(snapshot("image"), watchdog=watchdog)
+    stage.load()
+    try:
+        candidates = stage("a red apple", [0, 1], width=256, height=256, steps=2)
+    finally:
+        stage.unload()
+    assert [c.seed for c in candidates] == [0, 1]
+    assert all((c.image.size, c.image.mode) == ((256, 256), "RGB") for c in candidates)
+    assert all(0 < c.peak_gb < 24 for c in candidates)
     assert_torch_free()
