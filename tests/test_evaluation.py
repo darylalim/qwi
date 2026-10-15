@@ -125,6 +125,7 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
 
 def test_review_csv_has_one_row_per_image_and_check(r: Runner) -> None:
     result = r.run()
+    assert b"\r" not in (result.results_dir / "review.csv").read_bytes()  # LF like the repo
     with (result.results_dir / "review.csv").open(newline="") as f:
         rows = list(csv.DictReader(f))
     checks = sum(len(p.checks) for p in evaluation.load_prompts())

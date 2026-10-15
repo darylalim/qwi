@@ -128,6 +128,7 @@ def test_the_same_seed_reproduces_the_session(ab: tuple[Path, Path]) -> None:
 
 def test_review_csv_starts_empty_with_one_row_per_item_and_check(ab: tuple[Path, Path]) -> None:
     session = new(ab)
+    assert b"\r" not in (session / "review.csv").read_bytes()  # LF like the repo
     with (session / "review.csv").open(newline="") as f:
         rows = list(csv.DictReader(f))
     checks = sum(len(p.checks) for p in load_prompts()) * 2

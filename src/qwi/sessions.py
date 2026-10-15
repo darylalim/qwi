@@ -101,7 +101,7 @@ def _items(keys: list[tuple[str, int]], rows: dict, rng: random.Random, start: i
 
 def _write_review(path: Path, items: list[Item], judged: dict[tuple[str, str], list[str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")  # LF, like the rest of the repo
         writer.writerow(REVIEW_COLUMNS)
         for item in items:
             # The item's own row (empty check) holds "prefer" and "notes".
