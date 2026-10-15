@@ -31,16 +31,18 @@ def test_resolve_reads_the_cache_offline_at_the_pinned_revision(
 ) -> None:
     import huggingface_hub
 
-    calls: list[tuple[str, str, bool]] = []
+    calls: list[tuple[str, str, list[str] | None, bool]] = []
 
-    def fake(repo_id: str, *, revision: str, local_files_only: bool) -> str:
-        calls.append((repo_id, revision, local_files_only))
+    def fake(
+        repo_id: str, *, revision: str, allow_patterns: list[str] | None, local_files_only: bool
+    ) -> str:
+        calls.append((repo_id, revision, allow_patterns, local_files_only))
         return str(tmp_path)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
     guard = models.spec("guard")
     assert models.resolve("guard") == tmp_path
-    assert calls == [(guard.repo, guard.revision, True)]
+    assert calls == [(guard.repo, guard.revision, None, True)]
 
 
 def test_resolve_raises_model_unavailable_when_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:

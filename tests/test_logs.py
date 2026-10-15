@@ -1,5 +1,4 @@
 import logging
-from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -9,14 +8,8 @@ from qwi import logs, paths
 
 
 @pytest.fixture(autouse=True)
-def clean_logger(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def no_level_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("QWI_LOG_LEVEL", raising=False)
-    before = list(logs.LOGGER.handlers)
-    yield
-    for handler in logs.LOGGER.handlers[:]:
-        if handler not in before:
-            logs.LOGGER.removeHandler(handler)
-            handler.close()
 
 
 def test_run_log_writes_json_lines_with_context() -> None:

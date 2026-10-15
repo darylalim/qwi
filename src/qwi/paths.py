@@ -66,9 +66,13 @@ def relative(path: Path, run: Path) -> str:
     return path.relative_to(run).as_posix()
 
 
-def free_bytes() -> int:
-    """Free space on the volume holding `$QWI_HOME`, even before it exists."""
-    target = home()
-    while not target.exists():
-        target = target.parent
-    return shutil.disk_usage(target).free
+def free_bytes(target: Path | None = None) -> int:
+    """Free space on the volume holding `target` (default `$QWI_HOME`), even before it exists."""
+    return shutil.disk_usage(existing_ancestor(target or home())).free
+
+
+def existing_ancestor(path: Path) -> Path:
+    """`path` itself, or its nearest parent that exists (`$QWI_HOME` is created lazily)."""
+    while not path.exists():
+        path = path.parent
+    return path
