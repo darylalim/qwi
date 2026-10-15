@@ -43,6 +43,7 @@ class RunRecord:
     starred: bool = False
     timings_s: dict[str, float] = field(default_factory=dict)
     peak_mem_gb: dict[str, float] = field(default_factory=dict)
+    swap_gb: dict[str, float] = field(default_factory=dict)  # system swap-out delta per stage
     config: dict[str, Any] = field(default_factory=dict)  # steps, size, n, encoder, ...
 
     def __post_init__(self) -> None:

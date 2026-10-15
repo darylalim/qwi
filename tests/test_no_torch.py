@@ -13,6 +13,8 @@ import pytest
 import qwi  # noqa: F401  # forces HF_HUB_OFFLINE=1 before huggingface_hub is imported
 from qwi import memory, models
 from qwi.config import DEFAULTS
+from qwi.events import DenoiseStep, Event
+from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.generate import Generate
 
 pytestmark = pytest.mark.slow
@@ -75,10 +77,23 @@ def test_generate_stage_runs_two_seeds() -> None:
     stage = Generate(models.resolve("image"), watchdog=watchdog)
     stage.load()
     try:
-        candidates = stage("a red apple", [0, 1], width=256, height=256, steps=2)
+        candidates = list(stage("a red apple", [0, 1], width=256, height=256, steps=2))
     finally:
         stage.unload()
     assert [c.seed for c in candidates] == [0, 1]
     assert all((c.image.size, c.image.mode) == ((256, 256), "RGB") for c in candidates)
     assert all(0 < c.peak_gb < 24 for c in candidates)
+    assert_torch_free()
+
+
+def test_pipeline_runs_end_to_end() -> None:
+    # Real mflux step hooks drive the progress events; QWI_HOME is a tmp dir (conftest).
+    events: list[Event] = []
+    request = GenerateRequest("a red apple", n=2, steps=2, width=256, height=256, seed=0)
+    rec = Pipeline().run(request, events.append)
+    assert rec.status == "ok", rec.error
+    assert [c["seed"] for c in rec.candidates] == [0, 1]
+    steps = [(e.candidate, e.step, e.total) for e in events if isinstance(e, DenoiseStep)]
+    assert steps == [(0, 1, 2), (0, 2, 2), (1, 1, 2), (1, 2, 2)]
+    assert 0 < rec.peak_mem_gb["generate"] < 24
     assert_torch_free()

@@ -142,6 +142,8 @@ def classify(exc: BaseException, stage: str) -> BaseException:
     """
     if isinstance(exc, QwiError):
         return exc
+    if isinstance(exc, KeyboardInterrupt):  # outside mflux's step loop; inside, see below
+        return GenerationCancelled()
     if isinstance(exc, RuntimeError) and any(p in str(exc) for p in OOM_PATTERNS):
         return DeviceOutOfMemory(stage, str(exc))
     if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
@@ -160,3 +162,21 @@ def status(exc: BaseException) -> str | None:
 
 def exit_code(exc: BaseException) -> int:
     return exc.exit_code if isinstance(exc, QwiError) else UNEXPECTED_EXIT
+
+
+def exit_code_for(status: str, error_type: str | None = None) -> int:
+    """The CLI exit code for a finished `RunRecord` (`status`, `error["type"]`)."""
+    if status == "ok":
+        return 0
+    if status == "error":
+        kind = _by_name().get(error_type or "")
+        return kind.exit_code if kind else UNEXPECTED_EXIT
+    by_status = {cls.status: cls.exit_code for cls in (GuardBlocked, GenerationCancelled)}
+    return by_status.get(status, UNEXPECTED_EXIT)
+
+
+def _by_name(cls: type[QwiError] = QwiError) -> dict[str, type[QwiError]]:
+    found = {cls.__name__: cls}
+    for sub in cls.__subclasses__():
+        found |= _by_name(sub)
+    return found
