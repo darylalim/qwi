@@ -31,8 +31,26 @@ app.add_typer(runs_app, name="runs")
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
 
 
+def _version(value: bool) -> None:
+    if value:
+        from importlib.metadata import version
+
+        typer.echo(f"qwi {version('qwi')}")
+        raise typer.Exit()
+
+
 @app.callback()
-def main() -> None:
+def main(
+    _: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version,
+            is_eager=True,
+            help="Show the version (from the package metadata) and exit.",
+        ),
+    ] = False,
+) -> None:
     """qwi: guard → rewrite → generate N seeds → rerank."""
 
 

@@ -174,3 +174,16 @@ def test_runs_show_unknown_or_ambiguous_id_exits_1(run_id: str) -> None:
     result = runner.invoke(cli.app, ["runs", "show", run_id])
     assert result.exit_code == 1
     assert f"Run {run_id!r}" in result.output
+
+
+def test_version_comes_from_the_package_metadata() -> None:
+    import tomllib
+    from importlib.metadata import version
+
+    from .conftest import ROOT
+
+    result = runner.invoke(cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output == f"qwi {version('qwi')}\n"
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert version("qwi") == declared  # the installed metadata matches pyproject.toml
