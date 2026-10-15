@@ -7,12 +7,13 @@ import sys
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from types import FrameType
 from typing import Annotated
 
 import typer
 
-from qwi import errors, lock, logs, record, storage
+from qwi import errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
 from qwi.evaluation import EvalRequest, EvalRunner
@@ -260,3 +261,46 @@ def eval_run(
     if result.error:
         typer.echo(f"{result.error['type']}: {result.error['message']}", err=True)
     raise typer.Exit(errors.exit_code_for(result.status, (result.error or {}).get("type")))
+
+
+def _session_dir(arg: str) -> Path:
+    path = Path(arg)
+    return path if (path / "manifest.json").is_file() else paths.EVAL_SET / "sessions" / arg
+
+
+@eval_app.command("session")
+def eval_session(
+    a: Annotated[list[str], typer.Option("--a", help="Variant A results (repeatable).")],
+    b: Annotated[list[str], typer.Option("--b", help="Variant B results (repeatable).")],
+    seed: Annotated[int | None, typer.Option(help="Shuffle seed (default: random).")] = None,
+    extend: Annotated[
+        str | None, typer.Option(help="Keep this session's judgments; add the new pairs.")
+    ] = None,
+) -> None:
+    """Create a blind paired session: anonymous ids, shuffled order, random sides (§5.4)."""
+    try:
+        folder = sessions.create(
+            [sessions.results_dir(x) for x in a],
+            [sessions.results_dir(x) for x in b],
+            seed=seed,
+            extend=_session_dir(extend) if extend else None,
+        )
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"session {folder.name}: judge review.csv, then `qwi eval compare {folder.name}`")
+
+
+@eval_app.command("compare")
+def eval_compare(
+    session: Annotated[str, typer.Argument(help="Session folder, or its name in eval/sessions.")],
+    noise_floor: Annotated[int, typer.Option(min=0, help="From an A-vs-A session (§5.4).")] = 0,
+) -> None:
+    """Unblind a fully judged session, score it, and write report.md (§5.4 decision rule)."""
+    try:
+        report, path = sessions.write_report(_session_dir(session), noise_floor)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    o = report.overall
+    typer.echo(f"A = {report.a}, B = {report.b}: {o.wins} wins, {o.losses} losses, {o.ties} ties")
+    typer.echo(f"B is {report.verdict}: {report.reason}")
+    typer.echo(f"report {path}")
