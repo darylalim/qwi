@@ -107,6 +107,21 @@ class DiskFull(QwiError):
         self.free_bytes = free_bytes
 
 
+class InsufficientDisk(QwiError):
+    """Free disk would fall below the 20 GB rule (§5.7): checked before downloads and runs."""
+
+    exit_code = 6
+
+    def __init__(self, what: str, need_bytes: int, free_bytes: int, keep_bytes: int) -> None:
+        super().__init__(
+            f"Not enough disk for {what}: needs {need_bytes / 1e9:.1f} GB with "
+            f"{free_bytes / 1e9:.1f} GB free, and {keep_bytes / 1e9:.0f} GB must stay free. "
+            "Free space first (`qwi runs prune`, `hf cache`)."
+        )
+        self.need_bytes = need_bytes
+        self.free_bytes = free_bytes
+
+
 class GenerationCancelled(QwiError):
     """Cancel in the UI, or the first Ctrl-C in the CLI."""
 

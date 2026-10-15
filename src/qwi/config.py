@@ -22,6 +22,8 @@ class Defaults:
     allow_swap_limit_bytes: int = 6 * GiB
     # Pre-flight budget = min(wired limit, available memory) minus this (PLAN.md §5.11).
     preflight_headroom_bytes: int = 2 * GiB
+    # Free disk that must remain after any download, and before a run starts (PLAN.md §5.7).
+    min_free_disk_bytes: int = 20 * 10**9
     # run.log / app log level; `-v` or QWI_LOG_LEVEL=DEBUG overrides it (§5.11 "Logs").
     log_level: str = "INFO"
 

@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -36,3 +37,16 @@ def qwi_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "qwi_home"
     monkeypatch.setenv("QWI_HOME", str(home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def detach_log_handlers() -> Iterator[None]:
+    """Close log files a test attached (CLI commands attach the app log for their `$QWI_HOME`)."""
+    from qwi import logs
+
+    before = list(logs.LOGGER.handlers)
+    yield
+    for handler in logs.LOGGER.handlers[:]:
+        if handler not in before:
+            logs.LOGGER.removeHandler(handler)
+            handler.close()

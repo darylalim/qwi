@@ -11,3 +11,7 @@ def test_memory_defaults_match_plan_section_4() -> None:
     assert DEFAULTS.swap_limit_bytes == 2 * GiB
     assert DEFAULTS.allow_swap_limit_bytes == 6 * GiB
     assert DEFAULTS.preflight_headroom_bytes == 2 * GiB
+
+
+def test_disk_rule_matches_plan_section_5_7() -> None:
+    assert DEFAULTS.min_free_disk_bytes == 20 * 10**9
