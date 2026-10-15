@@ -567,6 +567,7 @@ dev = ["ruff", "ty", "pytest"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["*.md"]  # ruff 0.17 formats code blocks in Markdown; PLAN.md samples are specs
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "PTH"]
@@ -1421,7 +1422,7 @@ M5a (needs M1 events/cancel/lock/errors, M2 rewrite stage, M3 rerank) ─► M5b
 
 Everything here is static: project files, tooling, guardrails, and dependency resolution. It can be done (and reviewed) without touching the 48 GB disk budget or loading a model.
 
-- [ ] Scaffold per §5.5: `uv init --package --python 3.12`, `uv python pin 3.12`, `uv add mflux mlx-lm mlx-vlm pillow typer` (then pin mflux exactly), `uv add --dev ruff ty pytest`. Paste in the §5.5 tooling config, set `description`/`keywords` from §5.9 "Repo metadata" (with `tests/test_metadata.py`), and confirm the "All gates" command passes on the empty package.
+- [x] Scaffold per §5.5: `uv init --package --python 3.12`, `uv python pin 3.12`, `uv add mflux mlx-lm mlx-vlm pillow typer` (then pin mflux exactly), `uv add --dev ruff ty pytest`. Paste in the §5.5 tooling config, set `description`/`keywords` from §5.9 "Repo metadata" (with `tests/test_metadata.py`), and confirm the "All gates" command passes on the empty package.
 - [ ] **Claude Code guardrails (§5.8):** add `.claude/settings.json` (permission rules + hooks H1–H4) and `.claude/hooks/*.py` with their `tests/hooks/` fast tests. Pipe-test each script and prove H1 and H2 fire. Do this right after the scaffold, so every later step (and M0b) runs under the hooks.
 - [ ] **`.gitignore` (§5.7):** add the exact file from §5.7 and `tests/test_gitignore.py`; confirm `git status` is clean after `uv sync` and one CLI smoke run.
 - [ ] **License (§5.10):** add `LICENSE` (Apache-2.0), `NOTICE`, and the README "Model licenses" section; add the `license` / `license-files` fields to `pyproject.toml` and a `license` field per role to `models.toml`; add the §5.10 fast tests.
@@ -1563,6 +1564,8 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 | 2026-10-14 | Milestones: **M5 split into M5a (jobs + Generate + errors + rewrite-edit), M5b (History, Eval review, storage commands), M5c (theme, responsive, final checks)**; a **minimal blind Eval review app moved into M2** and `qwi doctor` / `models fetch` into M1, because earlier milestones depend on them; explicit dependency map and versions 0.1–0.7 | Each milestone fits one session; the dependency map exposed that the M2–M4 eval decisions needed a review UI that was scheduled for M5 |
 | 2026-10-14 | `PLAN.md` gets a table of contents | ~1,600 lines; implementation sessions should jump straight to the relevant spec |
 | 2026-10-14 | Gap review fixes: **no transparent output** (mflux txt2img decodes RGB only; RGBA needs the edit variant, now out of scope): `rgba` eval prompt → `isolated` (plain white), rewriter rule 6 updated; **bf16 reference encoder** for M4 via `text_encoder/`-only download when needed; **stage-batched eval runner** under the run lock; **M0b mlx-vlm/mlx-lm smoke test**; **lazy model-library imports** + `test_imports.py`; **`config.py` single source of defaults** + CLI reference; **eval images in `$QWI_HOME/eval`**; README outline in M5c; option C wording clarified; **ports 8501/8502**; restored the automated eval checks dropped in the protocol rewrite | Verified against mflux source (`models/qwen21/README.md`); each fix removes a wrong assumption, a hidden cost (model reloads, import time, untracked disk), or a scattered definition before implementation starts |
+| 2026-10-14 | M0a scaffold: package version starts at **`0.0.0`** (`uv init` writes `0.1.0`; reset with `uv version 0.0.0`). Resolved: mflux 0.22.0, mlx-lm 0.32.0, mlx-vlm 0.7.8, pillow 12.3.0, typer 0.27.3, streamlit 1.66.0 (`ui` extra), ruff 0.17.0, ty 0.0.87, pytest 9.1.1, CPython 3.12.15. `license`/`license-files` wait for the §5.10 task (uv_build fails on missing `LICENSE`) | §6 reserves `0.1.0` for the M1 release, and the §5.9 release gate fails on downgrades, so the first release must be a real bump |
+| 2026-10-14 | ruff: `extend-exclude = ["*.md"]` (§5.5) | Observed: ruff 0.17 formats Python code blocks in Markdown, so a bare `ruff format` rewrote the `PLAN.md` samples and `format --check` would fail on the untouched plan. The samples are specs (comment alignment, abbreviated dicts), not code |
 ---
 
 ## 9. Open questions
