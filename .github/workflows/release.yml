@@ -55,5 +55,5 @@ jobs:
         run: |
           flags=()
           if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "v$VERSION" --target "$HEAD_SHA" --title "qwi $VERSION" \
+          gh release create "v$VERSION" --target "$HEAD_SHA" --title "v$VERSION" \
             --generate-notes "${flags[@]}" dist/*
