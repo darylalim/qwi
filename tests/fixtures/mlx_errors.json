@@ -1,0 +1,26 @@
+{
+  "_about": "MLX allocation failures for errors.classify (PLAN.md §5.11). Recorded in M0b on an M2 Max (32 GB), mlx 0.32.4. 'observed' entries were raised for real and copied verbatim; 'binary_only' entries are format strings found in libmlx.dylib that were not provoked. M1 pins the classifier's patterns against this file.",
+  "device": {
+    "max_buffer_length": 20100448256,
+    "max_recommended_working_set_size": 26800603136,
+    "memory_limit_default": 32641751449
+  },
+  "observed": [
+    {
+      "probe": "one mx.zeros buffer just over max_buffer_length",
+      "type": "RuntimeError",
+      "module": "builtins",
+      "message": "[metal::malloc] Attempting to allocate 20100677632 bytes which is greater than the maximum allowed buffer size of 20100448256 bytes.",
+      "classify_as": "DeviceOutOfMemory"
+    }
+  ],
+  "binary_only": [
+    "[metal::malloc] Resource limit (",
+    "[malloc] Unable to allocate ",
+    "[METAL] Command buffer execution failed: {}."
+  ],
+  "not_an_exception": {
+    "probe": "QwenImage21 q4 pack at 2048², 2 steps, N=1",
+    "result": "no exception: denoise 64.5 s/step, then the VAE decode swapped > 6 GB within 144 s and a watchdog killed the process"
+  }
+}
