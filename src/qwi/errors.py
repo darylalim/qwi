@@ -146,6 +146,25 @@ class EvalExists(QwiError):
     status = None
 
 
+class SessionError(QwiError):
+    """A review session can't be created or read (bad results folders, manifest, values)."""
+
+    status = None
+
+
+class SessionIncomplete(QwiError):
+    """`qwi eval compare` refuses to reveal the variants until every check is judged (§5.4)."""
+
+    status = None
+
+    def __init__(self, missing: int, examples: list[str]) -> None:
+        super().__init__(
+            f"{missing} checks are not judged yet (e.g. {', '.join(examples)}); "
+            "variants stay hidden until every check is pass/fail"
+        )
+        self.missing = missing
+
+
 class GenerationCancelled(QwiError):
     """Cancel in the UI, or the first Ctrl-C in the CLI."""
 
