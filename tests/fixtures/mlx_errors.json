@@ -19,8 +19,14 @@
     "[malloc] Unable to allocate ",
     "[METAL] Command buffer execution failed: {}."
   ],
-  "not_an_exception": {
-    "probe": "QwenImage21 q4 pack at 2048², 2 steps, N=1",
-    "result": "no exception: denoise 64.5 s/step, then the VAE decode swapped > 6 GB within 144 s and a watchdog killed the process"
-  }
+  "not_an_exception": [
+    {
+      "probe": "QwenImage21 q4 pack at 2048², 2 steps, N=1",
+      "result": "no exception: denoise 64.5 s/step, then the VAE decode swapped > 6 GB within 144 s and a watchdog killed the process"
+    },
+    {
+      "probe": "QwenImage21 q4 pack at 2048², 2 steps, N=1, mx.set_memory_limit(24696061952) (M1)",
+      "result": "no exception: completed in 146.8 s, peak 37923274866 bytes (12 GiB over the limit), swap-outs +5.64 GB"
+    }
+  ]
 }
