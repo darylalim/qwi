@@ -18,6 +18,7 @@ OOM_PATTERNS = (
     "[METAL] Command buffer execution failed",
 )
 _SMALLER = "close other apps, or use 512² or fewer candidates"
+_RUNS = "$QWI_HOME/runs"
 
 
 class QwiError(Exception):
@@ -120,6 +121,17 @@ class InsufficientDisk(QwiError):
         )
         self.need_bytes = need_bytes
         self.free_bytes = free_bytes
+
+
+class RunNotFound(QwiError):
+    """No run folder matches the id given to `qwi runs show` (exact name or a unique prefix)."""
+
+    status = None
+
+    def __init__(self, run_id: str, matches: list[str]) -> None:
+        detail = f"matches {len(matches)} runs: {', '.join(matches[:5])}" if matches else "no match"
+        super().__init__(f"Run {run_id!r}: {detail}. See {_RUNS}.")
+        self.run_id = run_id
 
 
 class GenerationCancelled(QwiError):

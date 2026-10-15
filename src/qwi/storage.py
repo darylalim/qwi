@@ -16,7 +16,7 @@ from typing import Literal
 
 from qwi import logs, models, paths
 from qwi.config import DEFAULTS
-from qwi.errors import InsufficientDisk, ModelUnavailable
+from qwi.errors import InsufficientDisk, ModelUnavailable, RunNotFound
 from qwi.record import RUN_JSON, RunRecord
 
 RUNS_WARN_BYTES = 2 * 10**9  # §5.7 "Retention"
@@ -62,6 +62,17 @@ def list_runs(runs: Path | None = None) -> list[RunRecord]:
     seconds = time.perf_counter() - started
     logs.event(logging.DEBUG, None, "runs_scan", "scanned runs", runs=len(records), seconds=seconds)
     return records
+
+
+def find_run(run_id: str) -> Path:
+    """The run folder named `run_id`, or the only one starting with it."""
+    runs = paths.runs_dir()
+    if (runs / run_id / RUN_JSON).is_file():
+        return runs / run_id
+    matches = sorted(p.parent.name for p in runs.glob(f"{run_id}*/{RUN_JSON}"))
+    if len(matches) != 1:
+        raise RunNotFound(run_id, matches)
+    return runs / matches[0]
 
 
 def check_disk() -> Check:

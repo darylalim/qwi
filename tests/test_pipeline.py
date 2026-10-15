@@ -1,5 +1,6 @@
 """`Pipeline.run` with a fake generate stage: lifecycle, events, cancel, failures, lock."""
 
+import errno
 import threading
 from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
@@ -10,7 +11,13 @@ import pytest
 from PIL import Image
 
 from qwi import errors, lock, logs, memory, paths, preflight, record
-from qwi.errors import PipelineBusy
+from qwi.errors import (
+    DeviceOutOfMemory,
+    GenerationCancelled,
+    InsufficientDisk,
+    ModelUnavailable,
+    PipelineBusy,
+)
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
@@ -62,7 +69,10 @@ class Harness:
         self.configure: Callable[[FakeStage], None] = lambda stage: None
         self.on_event: Callable[[Event], None] = lambda event: None
         self.resolved: list[str] = []
-        self.pipeline = Pipeline(self._make, resolve=self._resolve)
+        self.startup: Callable[[list[str]], None] = lambda roles: None
+        self.pipeline = Pipeline(
+            self._make, resolve=self._resolve, startup=lambda r: self.startup(r)
+        )
 
     def _resolve(self, role: str) -> Path:
         self.resolved.append(role)
@@ -287,3 +297,135 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
     h.run()
     assert held == [True]
     assert not lock.is_held()
+
+
+# --- Fault injection (§5.11 "Tests"): every failure path the M1 pipeline has ---------------
+
+
+def _raise(exc: BaseException) -> Callable[..., Any]:
+    def fail(*_: Any) -> Any:
+        raise exc
+
+    return fail
+
+
+def _fail_at(index: int, exc: BaseException) -> Callable[[Harness, pytest.MonkeyPatch], None]:
+    def setup(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+        h.configure = lambda stage: setattr(stage, "fail_at", (index, exc))
+
+    return setup
+
+
+def _startup(exc: BaseException) -> Callable[[Harness, pytest.MonkeyPatch], None]:
+    def setup(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+        h.startup = _raise(exc)
+
+    return setup
+
+
+def _resolve_missing(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    h.pipeline._resolve = _raise(ModelUnavailable("image", "not in the local HF cache"))
+
+
+def _tiny_gpu(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preflight, "wired_limit_bytes", lambda: 8 * 10**9)
+
+
+def _low_ram(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(memory, "vm_stat", lambda: vm(12 * 10**9))
+
+
+def _disk_full_on_second_save(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    saves = iter([None])
+    real_save = Image.Image.save
+
+    def save(self: Image.Image, fp: Any, *args: Any, **kwargs: Any) -> None:
+        if next(saves, "full") == "full":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_save(self, fp, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", save)
+
+
+OOM = "[metal::malloc] Attempting to allocate 20100677632 bytes which is greater than the maximum"
+FAULTS = [
+    # id, setup, status, error type, exit code, candidates kept, stage built
+    (
+        "startup-model",
+        _startup(ModelUnavailable("image", "missing")),
+        "error",
+        "ModelUnavailable",
+        5,
+        0,
+        False,
+    ),
+    (
+        "startup-disk",
+        _startup(InsufficientDisk("a run", 0, 5 * 10**9, 20 * 10**9)),
+        "error",
+        "InsufficientDisk",
+        6,
+        0,
+        False,
+    ),
+    ("resolve-model", _resolve_missing, "error", "ModelUnavailable", 5, 0, False),
+    ("preflight-limit", _tiny_gpu, "error", "InsufficientMemory", 4, 0, False),
+    ("preflight-swap", _low_ram, "error", "SwapRisk", 4, 0, False),
+    ("mlx-oom", _fail_at(1, RuntimeError(OOM)), "error", "DeviceOutOfMemory", 4, 1, True),
+    (
+        "swap-watchdog",
+        _fail_at(2, DeviceOutOfMemory("generate", "swapped 2.1 GB")),
+        "error",
+        "DeviceOutOfMemory",
+        4,
+        2,
+        True,
+    ),
+    ("disk-full", _disk_full_on_second_save, "error", "DiskFull", 6, 1, True),
+    (
+        "unexpected",
+        _fail_at(1, RuntimeError("[gather] index out of bounds")),
+        "error",
+        "RuntimeError",
+        1,
+        1,
+        True,
+    ),
+    ("cancelled", _fail_at(1, GenerationCancelled()), "cancelled", None, 130, 1, True),
+    ("ctrl-c", _fail_at(0, KeyboardInterrupt()), "cancelled", None, 130, 0, True),
+]
+
+
+@pytest.mark.parametrize(
+    ("setup", "status", "error_type", "code", "kept", "built"),
+    [pytest.param(*fault[1:], id=fault[0]) for fault in FAULTS],
+)
+def test_every_failure_path(
+    h: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    setup: Callable[[Harness, pytest.MonkeyPatch], None],
+    status: str,
+    error_type: str | None,
+    code: int,
+    kept: int,
+    built: bool,
+) -> None:
+    setup(h, monkeypatch)
+    rec = h.run(width=768, height=768)
+    run = run_dir(rec)  # also checks run.json on disk == the returned record
+
+    assert rec.status == status
+    assert (rec.error or {}).get("type") == error_type
+    assert errors.exit_code_for(rec.status, error_type) == code
+    assert len(rec.candidates) == kept
+    assert all((run / c["path"]).is_file() for c in rec.candidates)
+    assert [stage.unloaded for stage in h.stages] == ([True] if built else [])
+    assert not lock.is_held()
+
+    error_lines = logs.read(run / "run.log", "error")
+    if status == "error":
+        (line,) = error_lines
+        assert line["type"] == error_type
+        assert "Traceback" in line["traceback"]
+    else:
+        assert error_lines == []

@@ -1,9 +1,11 @@
+import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from qwi import cli, storage
+from qwi import cli, logs, paths, record, storage
 from qwi.errors import InsufficientDisk
 from qwi.events import CandidateReady, DenoiseStep, RunStarted, StageFinished, StageStarted
 from qwi.record import RunRecord
@@ -104,3 +106,71 @@ def test_generate_reports_busy_with_exit_3(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(cli, "Pipeline", Busy)
     result = runner.invoke(cli.app, ["generate", "p"])
     assert (result.exit_code, "Another run is in progress" in result.output) == (3, True)
+
+
+def _saved_run(name: str, **fields: Any) -> Path:
+    run = paths.runs_dir() / name
+    run.mkdir(parents=True)
+    rec = RunRecord(
+        "a red apple",
+        seeds=[7, 8],
+        config={"width": 768, "height": 768, "n": 2, "steps": 20, "encoder": "A-q4"},
+        **fields,
+    )
+    record.write(rec, run)
+    return run
+
+
+def test_runs_show_prints_the_summary() -> None:
+    _saved_run(
+        "20261015-093005-abcdef",
+        status="ok",
+        candidates=[
+            {"index": 0, "seed": 7, "path": "cand_0_seed7.png", "seconds": 125.8, "peak_gb": 13.8}
+        ],
+        timings_s={"generate": 251.6},
+        peak_mem_gb={"generate": 13.8},
+        swap_gb={"generate": 0.0},
+    )
+    result = runner.invoke(cli.app, ["runs", "show", "20261015-0930"])  # a unique prefix
+    assert result.exit_code == 0
+    out = result.output
+    assert "run      20261015-093005-abcdef  [ok]" in out
+    assert "768x768, 20 steps, n=2, encoder A-q4, seeds [7, 8]" in out
+    assert "cand 0  seed 7  cand_0_seed7.png  125.8 s  peak 13.8 GB" in out
+    assert "swap     generate 0 GB" in out
+
+
+def test_runs_show_repairs_an_interrupted_run() -> None:
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    _saved_run("20261015-093005-abcdef", pid=child.pid)
+    result = runner.invoke(cli.app, ["runs", "show", "20261015-093005-abcdef"])
+    assert "[interrupted]" in result.output
+
+
+def test_runs_show_log_filters_by_level_and_prints_tracebacks() -> None:
+    run = _saved_run("20261015-093005-abcdef", status="error")
+    with logs.run_log(run):
+        logs.event(logging.INFO, "generate", "candidate_ready", "cand_0_seed7.png", seed=7)
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            logs.exception("generate", "error", "Unexpected error", type="RuntimeError")
+    result = runner.invoke(cli.app, ["runs", "show", run.name, "--log", "--level", "warning"])
+    assert result.exit_code == 0
+    assert "candidate_ready" not in result.output
+    assert "ERROR   generate  error: Unexpected error  type=RuntimeError" in result.output
+    assert "    RuntimeError: boom" in result.output
+
+
+@pytest.mark.parametrize("run_id", ["nope", "20261015"])
+def test_runs_show_unknown_or_ambiguous_id_exits_1(run_id: str) -> None:
+    _saved_run("20261015-093005-abcdef")
+    _saved_run("20261015-093010-123456")
+    result = runner.invoke(cli.app, ["runs", "show", run_id])
+    assert result.exit_code == 1
+    assert f"Run {run_id!r}" in result.output

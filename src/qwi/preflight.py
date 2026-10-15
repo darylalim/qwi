@@ -91,7 +91,8 @@ def check(
     context = {"est_gb": round(est_gb, 2), "avail_gb": round(avail_gb, 2)}
     context["limit_gb"] = round(limit_gb, 2)
     if est_gb > limit_gb:
-        logs.event(logging.ERROR, stage, "preflight", "refused: over the memory limit", **context)
+        # WARNING: the caller logs the resulting error once, as ERROR with its traceback.
+        logs.event(logging.WARNING, stage, "preflight", "refused: over the memory limit", **context)
         raise InsufficientMemory(stage, est_gb, limit_gb)
     if est_gb > avail_gb and not allow_swap:
         logs.event(logging.WARNING, stage, "preflight", "refused: swap risk", **context)

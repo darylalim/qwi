@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from qwi import errors, logs, memory, models, paths, preflight, record
+from qwi import errors, logs, memory, models, paths, preflight, record, storage
 from qwi.config import DEFAULTS
 from qwi.errors import GenerationCancelled
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
@@ -26,6 +26,7 @@ from qwi.stages.generate import Candidate, Generate
 
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
+ROLES = ["image"]  # models this run loads; M2 adds guard + rewrite, M3 rerank
 
 
 @dataclass
@@ -85,9 +86,11 @@ class Pipeline:
         self,
         make_generate: StageFactory = _generate_stage,
         resolve: Callable[[str], Path] = models.resolve,
+        startup: Callable[[list[str]], None] = storage.startup,
     ) -> None:
         self._make_generate = make_generate
         self._resolve = resolve
+        self._startup = startup
         self._stage: str | None = None
 
     def run(
@@ -103,7 +106,7 @@ class Pipeline:
         rec = RunRecord(
             request.prompt,
             seeds=seeds,
-            model_revisions=record.model_revisions(["image"]),
+            model_revisions=record.model_revisions(ROLES),
             config={
                 "width": request.width,
                 "height": request.height,
@@ -120,6 +123,8 @@ class Pipeline:
             logs.event(logging.INFO, None, "run_started", "run started", run=run.name, seeds=seeds)
             on_event(RunStarted(run, seeds))
             try:
+                self._stage = "startup"
+                self._startup(ROLES)  # disk rule, $QWI_HOME writable, models cached (§5.11)
                 self._generate(request, rec, run, on_event)
             except (Exception, KeyboardInterrupt) as exc:
                 failure = errors.classify(exc, self._stage or "setup")

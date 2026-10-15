@@ -1,11 +1,18 @@
 """Command-line entry point. Commands land milestone by milestone (PLAN.md §5 CLI reference)."""
 
 import logging
+import os
+import signal
+import sys
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
+from types import FrameType
 from typing import Annotated
 
 import typer
 
-from qwi import errors, logs, storage
+from qwi import errors, lock, logs, record, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
@@ -13,7 +20,9 @@ from qwi.pipeline import GenerateRequest, Pipeline
 
 app = typer.Typer(no_args_is_help=True, help="Local text-to-image pipeline for Apple Silicon.")
 models_app = typer.Typer(no_args_is_help=True, help="Model weights (the only download path).")
+runs_app = typer.Typer(no_args_is_help=True, help="Past runs under $QWI_HOME/runs.")
 app.add_typer(models_app, name="models")
+app.add_typer(runs_app, name="runs")
 
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
 
@@ -27,6 +36,31 @@ def _fail(exc: QwiError) -> typer.Exit:
     logs.event(logging.ERROR, None, "cli_error", str(exc), type=type(exc).__name__)
     typer.echo(str(exc), err=True)
     return typer.Exit(exc.exit_code)
+
+
+@contextmanager
+def cancel_on_signals(cancel: threading.Event) -> Generator[None]:
+    """First Ctrl-C / SIGTERM: cancel cleanly at the next step. Second: exit now (§5.11).
+
+    Exiting now skips the run's cleanup; the OS frees its memory and lock, and its `running`
+    record is repaired as `interrupted` the next time it's read.
+    """
+
+    def handle(signum: int, frame: FrameType | None) -> None:
+        if cancel.is_set():
+            typer.echo("\nstopping now", err=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(130)
+        cancel.set()
+        typer.echo("\ncancelling at the next step (Ctrl-C again to stop now)", err=True)
+
+    previous = {sig: signal.signal(sig, handle) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def _render(event: Event) -> None:
@@ -69,7 +103,8 @@ def generate(
         verbose=verbose,
     )
     try:
-        rec = Pipeline().run(request, _render)
+        with cancel_on_signals(request.cancel):
+            rec = Pipeline().run(request, _render)
     except PipelineBusy as exc:
         raise _fail(exc) from exc
     error = rec.error or {}
@@ -110,3 +145,68 @@ def models_fetch(
     typer.echo(
         f"{role}: enough disk; nothing downloaded (--dry-run)" if path is None else str(path)
     )
+
+
+def _per_stage(values: dict[str, float], unit: str) -> str:
+    return ", ".join(f"{stage} {value:g} {unit}" for stage, value in values.items()) or "-"
+
+
+def _show_record(run_id: str, rec: record.RunRecord) -> None:
+    cfg = rec.config
+    typer.echo(f"run      {run_id}  [{rec.status}]  started {rec.started_at}  pid {rec.pid}")
+    typer.echo(f"prompt   {rec.user_prompt}")
+    if cfg:
+        size = f"{cfg.get('width')}x{cfg.get('height')}"
+        typer.echo(
+            f"config   {size}, {cfg.get('steps')} steps, n={cfg.get('n')}, "
+            f"encoder {cfg.get('encoder')}, seeds {rec.seeds}"
+        )
+    for c in rec.candidates:
+        typer.echo(
+            f"  cand {c['index']}  seed {c['seed']}  {c['path']}  "
+            f"{c.get('seconds', 0):g} s  peak {c.get('peak_gb', 0):g} GB"
+        )
+    typer.echo(f"time     {_per_stage(rec.timings_s, 's')}")
+    typer.echo(f"peak     {_per_stage(rec.peak_mem_gb, 'GB')}")
+    typer.echo(f"swap     {_per_stage(rec.swap_gb, 'GB')}")
+    for stage, check in rec.preflight.items():
+        typer.echo(
+            f"preflight {stage}: est {check['est_gb']} GB, avail {check['avail_gb']} GB, "
+            f"limit {check['limit_gb']} GB -> {check['decision']}"
+        )
+    if rec.error:
+        typer.echo(f"error    {rec.error['type']} in {rec.error['stage']}: {rec.error['message']}")
+
+
+def _show_log_line(line: dict) -> None:
+    fixed = {"ts", "level", "stage", "event", "msg", "traceback"}
+    context = " ".join(f"{k}={v}" for k, v in line.items() if k not in fixed)
+    head = f"{line['ts']} {line['level']:<7} {line.get('stage') or '-':<9} {line['event']}"
+    typer.echo(f"{head}: {line['msg']}  {context}".rstrip())
+    if "traceback" in line:
+        typer.echo("    " + line["traceback"].replace("\n", "\n    "))
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: Annotated[str, typer.Argument(help="Run folder name, or a unique prefix of it.")],
+    log: Annotated[bool, typer.Option("--log", help="Also print run.log.")] = False,
+    level: Annotated[
+        str, typer.Option(help="Lowest log level to print: debug, info, warning, error.")
+    ] = "info",
+) -> None:
+    """A run's summary from run.json, and optionally its JSON-lines log (§5.11)."""
+    try:
+        run = storage.find_run(run_id)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    rec = record.repair_if_interrupted(run, lock_held=lock.is_held())
+    _show_record(run.name, rec)
+    if log:
+        log_path = run / "run.log"
+        if not log_path.exists():
+            typer.echo("(no run.log)")
+            return
+        typer.echo("")
+        for line in logs.read(log_path, level):
+            _show_log_line(line)
