@@ -7,6 +7,7 @@ import sys
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import Annotated
@@ -22,12 +23,14 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RewriteReady,
     RunStarted,
     StageFinished,
     StageStarted,
 )
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.guard import GuardMode
+from qwi.stages.rewrite import RewriteStyle
 
 app = typer.Typer(no_args_is_help=True, help="Local text-to-image pipeline for Apple Silicon.")
 models_app = typer.Typer(no_args_is_help=True, help="Model weights (the only download path).")
@@ -39,6 +42,7 @@ app.add_typer(runs_app, name="runs")
 
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
 GUARD_MODE = GuardMode(DEFAULTS.guard_mode)
+REWRITE_STYLE = RewriteStyle(DEFAULTS.rewrite_style)
 
 
 def _version(value: bool) -> None:
@@ -95,7 +99,7 @@ def cancel_on_signals(cancel: threading.Event) -> Generator[None]:
             signal.signal(sig, handler)
 
 
-def _render(event: Event) -> None:
+def _render(event: Event, show_rewrite: bool = False) -> None:
     match event:
         case RunStarted(run_dir, seeds):
             typer.echo(f"run {run_dir.name} (seeds {seeds[0]}…{seeds[-1]})")
@@ -105,6 +109,13 @@ def _render(event: Event) -> None:
             typer.echo(f"guard warning: {summary}", err=True)
         case GuardVerdict(decision="block", summary=summary):
             typer.echo(f"Blocked by guard: {summary}", err=True)
+        case RewriteReady(text, fallback_reason, style):
+            if show_rewrite:
+                typer.echo(f"rewrite ({style}): {text or '(empty)'}")
+            if fallback_reason:
+                typer.echo(
+                    f"rewrite not used ({fallback_reason}): generating from your prompt", err=True
+                )
         case DenoiseStep(candidate, step, total):
             typer.echo(f"\r  candidate {candidate + 1}: step {step}/{total}", nl=False)
         case CandidateReady(index, seed, path):
@@ -125,6 +136,15 @@ def generate(
         GuardMode,
         typer.Option(help="How Controversial prompts are handled. Unsafe always blocks."),
     ] = GUARD_MODE,
+    no_rewrite: Annotated[
+        bool, typer.Option("--no-rewrite", help="Generate from the prompt as given.")
+    ] = False,
+    rewrite_style: Annotated[
+        RewriteStyle, typer.Option(help="Rewriter system prompt: 40-120 or 400-500 words.")
+    ] = REWRITE_STYLE,
+    show_rewrite: Annotated[
+        bool, typer.Option("--show-rewrite", help="Print the rewrite before generating.")
+    ] = False,
     allow_swap: Annotated[
         bool, typer.Option("--allow-swap", help="Run even if pre-flight expects swap.")
     ] = False,
@@ -140,12 +160,14 @@ def generate(
         height=height,
         seed=seed,
         guard_mode=guard_mode.value,
+        rewrite=not no_rewrite,
+        rewrite_style=rewrite_style.value,
         allow_swap=allow_swap,
         verbose=verbose,
     )
     try:
         with cancel_on_signals(request.cancel):
-            rec = Pipeline().run(request, _render)
+            rec = Pipeline().run(request, partial(_render, show_rewrite=show_rewrite))
     except PipelineBusy as exc:
         raise _fail(exc) from exc
     error = rec.error or {}
@@ -196,6 +218,12 @@ def _show_record(run_id: str, rec: record.RunRecord) -> None:
     cfg = rec.config
     typer.echo(f"run      {run_id}  [{rec.status}]  started {rec.started_at}  pid {rec.pid}")
     typer.echo(f"prompt   {rec.user_prompt}")
+    if rec.guard:
+        typer.echo(f"guard    {rec.guard['decision']} ({rec.guard['mode']})", nl=False)
+        typer.echo(f": {rec.guard['reason']}" if rec.guard["reason"] else "")
+    if rec.rewritten_prompt:
+        used = f"not used: {rec.rewrite_fallback_reason}" if rec.rewrite_fallback_reason else "used"
+        typer.echo(f"rewrite  [{used}] {rec.rewritten_prompt}")
     if cfg:
         size = f"{cfg.get('width')}x{cfg.get('height')}"
         typer.echo(

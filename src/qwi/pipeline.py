@@ -4,8 +4,8 @@ One run at a time (`RunLock`). Each stage: pre-flight check → load → run →
 `run()` always returns the `RunRecord`; its `status` and `error` say how it ended, and the
 traceback of any error is in `run.log`. Only `PipelineBusy` is raised, because no run exists then.
 
-Stages: guard (input pass, §5.2) → encode → generate. The rewrite stage (M2) goes between guard
-and encode and adds the guard's second pass; M3 adds rerank after generate.
+Stages: guard (input) → rewrite → guard (rewrite) → encode → generate (§1, §5.1, §5.2);
+`--no-rewrite` skips the rewrite and the second pass. M3 adds rerank after generate.
 """
 
 import logging
@@ -13,6 +13,7 @@ import random
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -25,6 +26,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RewriteReady,
     RunStarted,
     StageFinished,
     StageStarted,
@@ -34,10 +36,11 @@ from qwi.record import RunRecord
 from qwi.stages import guard
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate, Generate
+from qwi.stages.rewrite import Rewrite, Rewritten
 
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
-ROLES = ["guard", "image"]  # models this run loads; rewrite and rerank join in M2/M3
+ROLES = ["guard", "rewrite", "image"]  # models a run can load; rerank joins in M3
 
 
 @dataclass
@@ -49,6 +52,8 @@ class GenerateRequest:
     steps: int = DEFAULTS.steps
     seed: int | None = None  # base seed; random when None, recorded either way
     guard_mode: str = DEFAULTS.guard_mode
+    rewrite: bool = True  # False: --no-rewrite, generate from the prompt as given
+    rewrite_style: str = DEFAULTS.rewrite_style
     allow_swap: bool = False
     verbose: bool = False
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -58,6 +63,14 @@ class GuardStage(Protocol):
     def load(self) -> None: ...
 
     def __call__(self, text: str) -> guard.Verdict: ...
+
+    def unload(self) -> None: ...
+
+
+class RewriteStage(Protocol):
+    def load(self) -> None: ...
+
+    def __call__(self, prompt: str) -> Rewritten: ...
 
     def unload(self) -> None: ...
 
@@ -76,6 +89,7 @@ class GenerateStage(Protocol):
 
 StageFactory = Callable[[Path, Sequence[object], memory.SwapWatchdog], GenerateStage]
 GuardFactory = Callable[[Path], GuardStage]
+RewriteFactory = Callable[[Path, str], RewriteStage]
 
 
 def default_generate_stage(
@@ -86,6 +100,15 @@ def default_generate_stage(
 
 def default_guard_stage(model_path: Path) -> GuardStage:
     return guard.Guard(model_path)
+
+
+def default_rewrite_stage(model_path: Path, style: str) -> RewriteStage:
+    return Rewrite(model_path, style)
+
+
+def roles(request: GenerateRequest) -> list[str]:
+    """The models this request loads: what startup checks and `run.json` records."""
+    return [r for r in ROLES if r != "rewrite" or request.rewrite]
 
 
 def ignore_event(_: Event) -> None:
@@ -115,9 +138,11 @@ class Pipeline:
         resolve: Callable[[str], Path] = models.resolve,
         startup: Callable[[list[str]], None] = storage.startup,
         make_guard: GuardFactory = default_guard_stage,
+        make_rewrite: RewriteFactory = default_rewrite_stage,
     ) -> None:
         self._make_generate = make_generate
         self._make_guard = make_guard
+        self._make_rewrite = make_rewrite
         self._resolve = resolve
         self._startup = startup
         self._stage: str | None = None
@@ -135,13 +160,14 @@ class Pipeline:
         rec = RunRecord(
             request.prompt,
             seeds=seeds,
-            model_revisions=record.model_revisions(ROLES),
+            model_revisions=record.model_revisions(roles(request)),
             config={
                 "width": request.width,
                 "height": request.height,
                 "n": request.n,
                 "steps": request.steps,
                 "encoder": ENCODER,
+                "rewrite": request.rewrite_style if request.rewrite else "none",
                 "base_seed": base,
                 "allow_swap": request.allow_swap,
             },
@@ -153,9 +179,9 @@ class Pipeline:
             on_event(RunStarted(run, seeds))
             try:
                 self._stage = "startup"
-                self._startup(ROLES)  # disk rule, $QWI_HOME writable, models cached (§5.11)
-                self._guard(request, rec, run, on_event)
-                self._generate(request, rec, run, on_event)
+                self._startup(roles(request))  # disk, $QWI_HOME writable, models cached (§5.11)
+                prompt = self._prompt_stages(request, rec, run, on_event)
+                self._generate(request, prompt, rec, run, on_event)
             except (Exception, KeyboardInterrupt) as exc:
                 failure = errors.classify(exc, self._stage or "setup")
                 if isinstance(failure, GenerationCancelled):
@@ -172,59 +198,123 @@ class Pipeline:
             logs.event(logging.INFO, None, "run_finished", rec.status, status=rec.status)
         return rec
 
-    def _guard(
+    def _prompt_stages(
         self,
         request: GenerateRequest,
         rec: RunRecord,
         run: Path,
         on_event: Callable[[Event], None],
-    ) -> None:
-        """Stage 1, input pass (§5.2): a block ends the run before any other model loads."""
-        stage = self._stage = "guard"
+    ) -> str:
+        """Stages 1-2: guard the input, rewrite, guard the rewrite (§5.2, §5.1).
+
+        Returns the prompt to generate from. The guard stays loaded through the rewrite for its
+        second pass, then both are evicted before encoding (§4). A block raises `GuardBlocked`.
+        """
         policy = guard.load_policy()  # a broken table fails before anything loads
-        rec.preflight[stage] = preflight.check(
-            stage, preflight.STATIC_GB[stage], allow_swap=request.allow_swap
-        ).as_record()
-        record.write(rec, run)
-        if request.cancel.is_set():
-            raise GenerationCancelled()
-
-        watchdog = memory.SwapWatchdog(stage)
-        watchdog.start()
-        model = self._make_guard(self._resolve("guard"))
-        on_event(StageStarted(stage))
-        logs.event(logging.INFO, stage, "stage_started", "loading", mode=request.guard_mode)
-        started = time.perf_counter()
+        self._preflight(request, rec, run, "guard", preflight.STATIC_GB["guard"])
+        checker = self._make_guard(self._resolve("guard"))
+        rewriter: RewriteStage | None = None
         try:
-            with memory.track_peak() as peak:
-                model.load()
-                verdict = model(request.prompt)
-        finally:
-            model.unload()  # the rewrite stage will keep it loaded for the second pass (§4)
-            rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
-        self._finish_stage(rec, stage, started, peak.gb, on_event)
+            with self._measure(rec, "guard", on_event, mode=request.guard_mode):
+                checker.load()
+                verdict = checker(request.prompt)
+            result = guard.decide(request.guard_mode, verdict, policy=policy)
+            self._verdict(rec, run, on_event, "input", verdict, result, policy)
+            if not request.rewrite:
+                return request.prompt
 
-        result = guard.decide(request.guard_mode, verdict, policy=policy)
+            self._preflight(request, rec, run, "rewrite", preflight.STATIC_GB["rewrite"])
+            rewriter = self._make_rewrite(self._resolve("rewrite"), request.rewrite_style)
+            with self._measure(rec, "rewrite", on_event, style=request.rewrite_style):
+                rewriter.load()
+                out = rewriter(request.prompt)
+                # A fallback generates from the input, which the first pass already checked.
+                second = checker(out.prompt) if out.fallback_reason is None else None
+            rec.rewritten_prompt = out.text
+            rec.rewrite_fallback_reason = out.fallback_reason
+            rec.prompt_source = "user" if out.fallback_reason else "rewrite"
+            record.write(rec, run)
+            on_event(RewriteReady(out.text, out.fallback_reason, out.style))
+            logs.event(
+                logging.WARNING if out.fallback_reason else logging.INFO,
+                "rewrite",
+                "rewrite_ready",
+                f"fallback: {out.fallback_reason}" if out.fallback_reason else "rewrite used",
+                style=out.style,
+                words=len(out.text.split()),
+            )
+            if second is not None:
+                result = guard.decide(request.guard_mode, verdict, second, policy=policy)
+                self._verdict(rec, run, on_event, "rewrite", second, result, policy)
+            return out.prompt
+        finally:
+            checker.unload()
+            if rewriter is not None:
+                rewriter.unload()
+
+    def _verdict(
+        self,
+        rec: RunRecord,
+        run: Path,
+        on_event: Callable[[Event], None],
+        check: str,
+        verdict: guard.Verdict,
+        result: guard.GuardResult,
+        policy: guard.Policy,
+    ) -> None:
+        """Record the decision so far, report this pass, and raise on a block."""
         rec.guard = result.as_record()
         record.write(rec, run)
-        summary = result.summary()
-        on_event(GuardVerdict("input", verdict.level, verdict.categories, result.decision, summary))
+        action, _ = guard.judge(verdict, result.mode, policy)
+        summary = guard.describe_pass(check, verdict, result.mode)
+        on_event(GuardVerdict(check, verdict.level, verdict.categories, action, summary))
         logs.event(
-            logging.WARNING if result.decision == "warn" else logging.INFO,
-            stage,
+            logging.WARNING if action == "warn" else logging.INFO,
+            self._stage,
             "guard_verdict",
-            result.decision,
-            check="input",
+            action,
+            check=check,
             level=verdict.level,
             categories=list(verdict.categories),
             reason=result.reason,
         )
         if result.decision == "block":
-            raise GuardBlocked(summary)
+            raise GuardBlocked(result.summary())
+
+    def _preflight(
+        self, request: GenerateRequest, rec: RunRecord, run: Path, stage: str, est: float
+    ) -> None:
+        """The stage's memory check before anything loads, then a last chance to cancel."""
+        self._stage = stage
+        rec.preflight[stage] = preflight.check(
+            stage, est, allow_swap=request.allow_swap
+        ).as_record()
+        record.write(rec, run)
+        if request.cancel.is_set():
+            raise GenerationCancelled()
+
+    @contextmanager
+    def _measure(
+        self, rec: RunRecord, stage: str, on_event: Callable[[Event], None], **context: Any
+    ) -> Generator[None]:
+        """Time, peak memory and swap for a stage whose models load and run inside the block."""
+        self._stage = stage
+        watchdog = memory.SwapWatchdog(stage)
+        watchdog.start()  # baseline before the model loads (§8 watchdog method)
+        on_event(StageStarted(stage))
+        logs.event(logging.INFO, stage, "stage_started", "loading", **context)
+        started = time.perf_counter()
+        try:
+            with memory.track_peak() as peak:
+                yield
+        finally:
+            rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
+        self._finish_stage(rec, stage, started, peak.gb, on_event)
 
     def _generate(
         self,
         request: GenerateRequest,
+        prompt: str,
         rec: RunRecord,
         run: Path,
         on_event: Callable[[Event], None],
@@ -236,12 +326,7 @@ class Pipeline:
             preflight.generate_gb(request.width, request.height, encoder_resident=False),
             preflight.history_gb(stage, history),
         )
-        rec.preflight[stage] = preflight.check(
-            stage, est, allow_swap=request.allow_swap
-        ).as_record()
-        record.write(rec, run)
-        if request.cancel.is_set():
-            raise GenerationCancelled()
+        self._preflight(request, rec, run, stage, est)
 
         watchdog = memory.SwapWatchdog(stage, preflight.swap_limit_bytes(request.allow_swap))
         watchdog.start()  # baseline before the model loads (§8 watchdog method)
@@ -257,7 +342,7 @@ class Pipeline:
             encode_started = time.perf_counter()
             with memory.track_peak() as encode_peak:
                 generator.load()
-                (embeds,) = generator.encode([request.prompt], ENCODER)
+                (embeds,) = generator.encode([prompt], ENCODER)
             self._finish_stage(rec, "encode", encode_started, encode_peak.gb, on_event)
             logs.event(logging.INFO, "encode", "encoded", "encoder evicted", tokens=embeds.tokens)
             record.write(rec, run)
@@ -268,7 +353,7 @@ class Pipeline:
             on_event(StageStarted(stage))
             started = time.perf_counter()
             candidates = generator(
-                request.prompt,
+                prompt,
                 rec.seeds,
                 width=request.width,
                 height=request.height,

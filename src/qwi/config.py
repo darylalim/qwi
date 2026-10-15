@@ -1,6 +1,6 @@
 """The single source of defaults (PLAN.md §5): the CLI, UI and eval runner all read `DEFAULTS`."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 GiB = 2**30
 
@@ -16,6 +16,15 @@ class Defaults:
     guard_mode: str = "default"
     # The guard replies with two short lines; greedy decoding makes the verdict deterministic.
     guard_max_tokens: int = 64
+    # --rewrite-style (PLAN.md §5.1): "short" until the M2 three-way comparison picks a winner.
+    rewrite_style: str = "short"
+    # Low temperature keeps rewrites faithful; one fixed seed makes them reproducible (§5.1).
+    rewrite_temperature: float = 0.3
+    rewrite_top_p: float = 0.9
+    rewrite_seed: int = 0
+    # Per style: generation budget, and the word count above which the original prompt is kept.
+    rewrite_max_tokens: dict[str, int] = field(default_factory=lambda: {"short": 256, "long": 1024})
+    rewrite_max_words: dict[str, int] = field(default_factory=lambda: {"short": 200, "long": 700})
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached
     # and macOS swaps (PLAN.md §4, §8 2026-10-15 "Swap cause found").
     cache_limit_bytes: int = 2 * GiB

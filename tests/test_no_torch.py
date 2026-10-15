@@ -18,6 +18,7 @@ from qwi.events import DenoiseStep, Event
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.generate import Generate
 from qwi.stages.guard import Guard
+from qwi.stages.rewrite import Rewrite
 
 pytestmark = pytest.mark.slow
 
@@ -76,6 +77,22 @@ def test_guard_judges_prompts() -> None:
     assert_torch_free()
 
 
+@pytest.mark.parametrize("style", ["short", "long"])
+def test_rewriter_rewrites_and_keeps_quoted_text(style: str) -> None:
+    prompt = 'A coffee shop sign reading "THE DAILY GRIND"'
+    stage = Rewrite(models.resolve("rewrite"), style)
+    stage.load()
+    try:
+        out = stage(prompt)
+    finally:
+        stage.unload()
+    # Either the rewrite kept the quoted text, or the guard fell back to the user's prompt.
+    assert out.fallback_reason in (None, "quoted_text_missing", "too_long")
+    assert "THE DAILY GRIND" in out.prompt
+    assert out.text  # the model said something
+    assert_torch_free()
+
+
 def test_qwen_image_generates() -> None:
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
@@ -130,8 +147,10 @@ def test_pipeline_runs_end_to_end() -> None:
     steps = [(e.candidate, e.step, e.total) for e in events if isinstance(e, DenoiseStep)]
     assert steps == [(0, 1, 2), (0, 2, 2), (1, 1, 2), (1, 2, 2)]
     assert 0 < rec.peak_mem_gb["generate"] < 24
-    assert set(rec.timings_s) == {"guard", "encode", "generate"}
+    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate"}
     assert rec.guard["decision"] == "allow"
+    assert rec.rewritten_prompt
+    assert 0 < rec.peak_mem_gb["rewrite"] < 24
     assert_torch_free()
 
 
