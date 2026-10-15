@@ -258,7 +258,7 @@ def write_review(path: Path, prompts: list[EvalPrompt], rows: list[dict[str, Any
     """Single-variant review sheet: one row per (image, check), `result` left for the reviewer."""
     checks = {p.id: p.checks for p in prompts}
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")  # LF, like the rest of the repo
         writer.writerow(REVIEW_COLUMNS)
         for row in rows:
             for check in checks[row["id"]]:

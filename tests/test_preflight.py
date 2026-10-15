@@ -14,7 +14,8 @@ def test_generate_estimate_reproduces_the_measured_peaks() -> None:
     assert preflight.generate_gb(256, 256) == pytest.approx(12.15, abs=0.01)
     assert preflight.generate_gb(768, 768) == pytest.approx(17.78, abs=0.01)
     assert preflight.generate_gb(2048, 2048) == pytest.approx(37.92, abs=0.01)
-    assert preflight.generate_gb(768, 768, encoder_resident=False) == pytest.approx(13.81, abs=0.01)
+    # The M1 exit runs' max pipeline peak at 768² with the encoder evicted.
+    assert preflight.generate_gb(768, 768, encoder_resident=False) == pytest.approx(14.95, abs=0.01)
 
 
 def test_generate_estimate_interpolates_and_extends() -> None:

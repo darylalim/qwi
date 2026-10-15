@@ -27,7 +27,10 @@ HISTORY_RUNS = 10
 # (M1 memory-limit test). The peak isn't linear in pixels (~10.7 GB/Mpx below 768², ~5.6 above),
 # so estimates interpolate between neighbours and extend the end segments (§8 2026-10-15).
 GENERATE_PEAKS_GB = ((0.065536, 12.15), (0.589824, 17.78), (4.194304, 37.92))
-ENCODER_Q4_GB = 3.97  # evicted encoder: 13.82 GB at 768² (§4)
+# Evicting the encoder lowers the *pipeline's* generate peak by 2.83 GB, not the encoder's full
+# 3.97 GB: 17.78 resident vs 14.95 GB evicted at 768², the max over the 28 images of the M1 exit
+# runs (§8 2026-10-15). M0b's 13.82 GB came from a bare generate call, not the pipeline path.
+EVICTED_SAVING_GB = 2.83
 
 # Weights only (§4) until M2/M3 measure each stage's peak.
 STATIC_GB = {"guard": 1.1, "rewrite": 6.5, "rerank": 2.5}
@@ -39,7 +42,7 @@ def generate_gb(width: int, height: int, encoder_resident: bool = True) -> float
     segment = next((i for i in range(1, len(points) - 1) if mpx <= points[i][0]), len(points) - 1)
     (x0, y0), (x1, y1) = points[segment - 1], points[segment]
     gb = y0 + (y1 - y0) * (mpx - x0) / (x1 - x0)
-    return gb if encoder_resident else gb - ENCODER_Q4_GB
+    return gb if encoder_resident else gb - EVICTED_SAVING_GB
 
 
 def history_gb(stage: str, config: dict[str, Any], runs: Path | None = None) -> float:
