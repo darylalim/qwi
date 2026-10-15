@@ -23,7 +23,7 @@ from qwi.errors import DeviceOutOfMemory
 GB = 1e9  # run records report decimal GB, like mflux and Activity Monitor (§8)
 
 _PAGE_SIZE = re.compile(r"page size of (\d+) bytes")
-_SWAPOUTS = re.compile(r"^Swapouts:\s+(\d+)\.?$", re.MULTILINE)
+_COUNTER = re.compile(r'^"?([^":\n]+)"?:\s+(\d+)\.?$', re.MULTILINE)  # some keys are quoted
 
 
 def configure(cache_limit_bytes: int = DEFAULTS.cache_limit_bytes) -> None:
@@ -59,18 +59,44 @@ def track_peak() -> Generator[Peak]:
         peak.gb = mx.get_peak_memory() / GB
 
 
-def parse_swapouts(vm_stat: str) -> int:
-    """Bytes swapped out since boot, system-wide, from `vm_stat` output (§8 watchdog method)."""
-    page = _PAGE_SIZE.search(vm_stat)
-    pages = _SWAPOUTS.search(vm_stat)
-    if page is None or pages is None:
-        raise ValueError("vm_stat output has no page size or Swapouts line")
-    return int(pages.group(1)) * int(page.group(1))
+@dataclass(frozen=True)
+class VmStat:
+    """`/usr/bin/vm_stat` counters (pages) and the page size from its header."""
+
+    page_size: int
+    pages: dict[str, int]
+
+    def bytes(self, *names: str) -> int:
+        missing = [name for name in names if name not in self.pages]
+        if missing:
+            raise ValueError(f"vm_stat output has no {', '.join(missing)} line")
+        return sum(self.pages[name] for name in names) * self.page_size
+
+    @property
+    def swapout_bytes(self) -> int:
+        """Swapped out since boot, system-wide (§8 watchdog method): only deltas mean anything."""
+        return self.bytes("Swapouts")
+
+    @property
+    def available_bytes(self) -> int:
+        """Free + inactive + purgeable: what pre-flight treats as available (§5.11)."""
+        return self.bytes("Pages free", "Pages inactive", "Pages purgeable")
+
+
+def parse_vm_stat(text: str) -> VmStat:
+    page = _PAGE_SIZE.search(text)
+    if page is None:
+        raise ValueError("vm_stat output has no page size header")
+    return VmStat(int(page.group(1)), {k: int(v) for k, v in _COUNTER.findall(text)})
+
+
+def vm_stat() -> VmStat:
+    out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, check=True).stdout
+    return parse_vm_stat(out)
 
 
 def swapouts() -> int:
-    out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, check=True).stdout
-    return parse_swapouts(out)
+    return vm_stat().swapout_bytes
 
 
 class SwapWatchdog:

@@ -20,6 +20,10 @@ class Defaults:
     # The watchdog limit with --allow-swap: some swap is accepted, thrashing isn't. 6 GiB is the
     # probes' kill line, already ≈ 10x slower per step (PLAN.md §8 2026-10-15 --allow-swap).
     allow_swap_limit_bytes: int = 6 * GiB
+    # Pre-flight budget = min(wired limit, available memory) minus this (PLAN.md §5.11).
+    preflight_headroom_bytes: int = 2 * GiB
+    # run.log / app log level; `-v` or QWI_LOG_LEVEL=DEBUG overrides it (§5.11 "Logs").
+    log_level: str = "INFO"
 
 
 DEFAULTS = Defaults()

@@ -64,3 +64,11 @@ def link_best(candidate: Path) -> Path:
 def relative(path: Path, run: Path) -> str:
     """The form `run.json` stores, so `$QWI_HOME` can be moved (§5.7 "Run files")."""
     return path.relative_to(run).as_posix()
+
+
+def free_bytes() -> int:
+    """Free space on the volume holding `$QWI_HOME`, even before it exists."""
+    target = home()
+    while not target.exists():
+        target = target.parent
+    return shutil.disk_usage(target).free

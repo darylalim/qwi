@@ -10,3 +10,4 @@ def test_memory_defaults_match_plan_section_4() -> None:
     assert DEFAULTS.cache_limit_bytes == 2 * GiB
     assert DEFAULTS.swap_limit_bytes == 2 * GiB
     assert DEFAULTS.allow_swap_limit_bytes == 6 * GiB
+    assert DEFAULTS.preflight_headroom_bytes == 2 * GiB
