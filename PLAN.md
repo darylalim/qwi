@@ -1475,7 +1475,8 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 - [x] Encoder option A via mflux (**A-q4**: the pack's 4-bit encoder, §3, §8); embeddings computed once and reused across N seeds; encoder evicted after encoding (§4); `run.json` records `encoder: "A-q4"`.
 - [x] `qwi eval` runner skeleton (§5.4): reads `eval/prompts.jsonl`, uses fixed seeds, writes `results.jsonl` and `review.csv`. Reranker and OCR columns get filled in once M3 lands.
 - [x] `qwi eval session` / `qwi eval compare` (§5.4): anonymized shuffled manifest with randomized sides, paired win/loss/tie scoring per tag and per check, exact sign test, the resource rule (time ≤ 1.15×, peak ≤ 24 GB, zero swap), and the `report.md` writer. Fast tests with synthetic `review.csv` + `results.jsonl` fixtures (rules 1–3, the inconclusive → extend-seeds path, and unblinding refused until all rows are judged). `results.jsonl` records the swap delta.
-- [ ] `qwi --version` from package metadata, with a fast test. **Release `0.1.0`** with `uv version 0.1.0` in a PR (§5.9 versioning policy) and confirm the automatic release.
+- [x] `qwi --version` from package metadata, with a fast test (it also checks the installed metadata matches `pyproject.toml`).
+- [ ] **Exit runs, then release `0.1.0`:** the user runs `qwi generate "…" -n 4` and `qwi eval --variant baseline` (≈ 1 h of GPU time); confirm the Exit line below from their `run.json` / `results.jsonl` (no swap; 24 images), record peak, swap and the pre-flight estimate vs. available in §8 (and answer the §9 "available" question), then `uv version 0.1.0` in a PR (§5.9 versioning policy) and confirm the automatic release. Split from the `--version` task on 2026-10-15 so the release marks a verified milestone.
 - **Exit:** `qwi generate "..." -n 4` writes 4 images + `run.json` with timings/peak memory, no swap. `qwi eval --variant baseline` produces 24 images.
 
 ### M2 — Guard + Rewrite
