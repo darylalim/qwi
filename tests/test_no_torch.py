@@ -71,17 +71,35 @@ def test_qwen_image_generates() -> None:
     assert_torch_free()
 
 
-def test_generate_stage_runs_two_seeds() -> None:
+def test_encode_then_generate_matches_stock_mflux() -> None:
+    # Encoding once and evicting the encoder must not change the image (M0b: bit-identical).
+    import numpy as np
+    from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
+
+    stock = QwenImage21(model_path=str(models.resolve("image")))
+    expected = np.asarray(
+        stock.generate_image(
+            seed=0, prompt="a red apple", num_inference_steps=2, width=256, height=256
+        ).image
+    )
+    del stock
+    gc.collect()
+
     watchdog = memory.SwapWatchdog("generate")
     watchdog.start()
     stage = Generate(models.resolve("image"), watchdog=watchdog)
     stage.load()
     try:
+        embeds = stage.encode("a red apple")
+        assert stage._model is not None
+        assert stage._model.text_encoder is None
         candidates = list(stage("a red apple", [0, 1], width=256, height=256, steps=2))
     finally:
         stage.unload()
+    assert embeds.tokens > 0
     assert [c.seed for c in candidates] == [0, 1]
     assert all((c.image.size, c.image.mode) == ((256, 256), "RGB") for c in candidates)
+    assert np.array_equal(np.asarray(candidates[0].image), expected)
     assert all(0 < c.peak_gb < 24 for c in candidates)
     assert_torch_free()
 
@@ -96,4 +114,5 @@ def test_pipeline_runs_end_to_end() -> None:
     steps = [(e.candidate, e.step, e.total) for e in events if isinstance(e, DenoiseStep)]
     assert steps == [(0, 1, 2), (0, 2, 2), (1, 1, 2), (1, 2, 2)]
     assert 0 < rec.peak_mem_gb["generate"] < 24
+    assert set(rec.timings_s) == {"encode", "generate"}
     assert_torch_free()

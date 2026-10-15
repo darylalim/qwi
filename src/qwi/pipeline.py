@@ -22,6 +22,7 @@ from qwi.errors import GenerationCancelled
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
 from qwi.lock import RunLock
 from qwi.record import RunRecord
+from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate, Generate
 
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
@@ -44,6 +45,8 @@ class GenerateRequest:
 
 class GenerateStage(Protocol):
     def load(self) -> None: ...
+
+    def encode(self, prompt: str, encoder: str = ...) -> PromptEmbeds: ...
 
     def __call__(
         self, prompt: str, seeds: Sequence[int], *, width: int, height: int, steps: int
@@ -152,7 +155,8 @@ class Pipeline:
         stage = self._stage = "generate"
         history = {k: rec.config[k] for k in HISTORY_KEYS}
         est = max(
-            preflight.generate_gb(request.width, request.height, encoder_resident=True),
+            # The encoder is evicted before denoising, so the generate peak excludes it (§4).
+            preflight.generate_gb(request.width, request.height, encoder_resident=False),
             preflight.history_gb(stage, history),
         )
         rec.preflight[stage] = preflight.check(
@@ -166,13 +170,26 @@ class Pipeline:
         watchdog.start()  # baseline before the model loads (§8 watchdog method)
         hook = _ProgressHook(rec.seeds, request.cancel, on_event)
         generator = self._make_generate(self._resolve("image"), [hook], watchdog)
-        on_event(StageStarted(stage))
-        logs.event(logging.INFO, stage, "stage_started", "loading", est_gb=round(est, 2))
-        started = time.perf_counter()
+        on_event(StageStarted("encode"))
+        logs.event(logging.INFO, "encode", "stage_started", "loading", est_gb=round(est, 2))
         peaks: list[float] = []
         candidates: Generator[Candidate] | None = None
+        started: float | None = None  # set once denoising starts
         try:
-            generator.load()
+            self._stage = "encode"
+            encode_started = time.perf_counter()
+            with memory.track_peak() as encode_peak:
+                generator.load()
+                embeds = generator.encode(request.prompt, ENCODER)
+            self._finish_stage(rec, "encode", encode_started, encode_peak.gb, on_event)
+            logs.event(logging.INFO, "encode", "encoded", "encoder evicted", tokens=embeds.tokens)
+            record.write(rec, run)
+            if request.cancel.is_set():
+                raise GenerationCancelled()
+
+            self._stage = stage
+            on_event(StageStarted(stage))
+            started = time.perf_counter()
             candidates = generator(
                 request.prompt,
                 rec.seeds,
@@ -210,18 +227,28 @@ class Pipeline:
             if candidates is not None:
                 candidates.close()  # a cancel between candidates leaves it suspended
             generator.unload()
-            seconds = time.perf_counter() - started
-            peak = max(peaks, default=0.0)
-            rec.timings_s[stage] = round(seconds, 2)
-            rec.peak_mem_gb[stage] = round(peak, 2)
             rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
-            on_event(StageFinished(stage, seconds, peak))
-            logs.event(
-                logging.INFO,
-                stage,
-                "stage_finished",
-                "evicted",
-                seconds=round(seconds, 2),
-                peak_gb=round(peak, 2),
-                swap_gb=rec.swap_gb[stage],
-            )
+            if started is not None:
+                self._finish_stage(rec, stage, started, max(peaks, default=0.0), on_event)
+
+    @staticmethod
+    def _finish_stage(
+        rec: RunRecord,
+        stage: str,
+        started: float,
+        peak_gb: float,
+        on_event: Callable[[Event], None],
+    ) -> None:
+        seconds = time.perf_counter() - started
+        rec.timings_s[stage] = round(seconds, 2)
+        rec.peak_mem_gb[stage] = round(peak_gb, 2)
+        on_event(StageFinished(stage, seconds, peak_gb))
+        logs.event(
+            logging.INFO,
+            stage,
+            "stage_finished",
+            "done",
+            seconds=round(seconds, 2),
+            peak_gb=round(peak_gb, 2),
+            swap_gb=rec.swap_gb.get(stage),
+        )

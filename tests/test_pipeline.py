@@ -21,6 +21,7 @@ from qwi.errors import (
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
+from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate
 
 LIMIT = 26800603136  # max_recommended_working_set_size on the M2 Max (24.96 GiB)
@@ -43,6 +44,12 @@ class FakeStage:
 
     def load(self) -> None:
         self.loaded = True
+
+    def encode(self, prompt: str, encoder: str = "A-q4") -> PromptEmbeds:
+        import mlx.core as mx
+
+        self.encoded = (prompt, encoder)
+        return PromptEmbeds(prompt, mx.zeros((1, 12, 8)), mx.ones((1, 12)), encoder)
 
     def __call__(
         self, prompt: str, seeds: Sequence[int], *, width: int, height: int, steps: int
@@ -150,6 +157,8 @@ def test_events_arrive_in_order(h: Harness) -> None:
     assert h.kinds() == [
         "RunStarted",
         "StageStarted",
+        "StageFinished",
+        "StageStarted",
         *["DenoiseStep"] * 2,
         "CandidateReady",
         *["DenoiseStep"] * 2,
@@ -165,8 +174,8 @@ def test_events_arrive_in_order(h: Harness) -> None:
     ]
     assert isinstance(h.events[0], RunStarted)
     assert h.events[0].seeds == [100, 101]
-    assert isinstance(h.events[1], StageStarted)
-    assert h.events[1].stage == "generate"
+    assert [e.stage for e in h.events if isinstance(e, StageStarted)] == ["encode", "generate"]
+    assert [e.stage for e in h.events if isinstance(e, StageFinished)] == ["encode", "generate"]
     ready = [e for e in h.events if isinstance(e, CandidateReady)]
     assert [(e.index, e.seed, e.path.name) for e in ready][1] == (1, 101, "cand_1_seed101.png")
     assert isinstance(h.events[-1], StageFinished)
@@ -295,7 +304,7 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
         held.append(lock.is_held()) if isinstance(event, StageStarted) else None
     )
     h.run()
-    assert held == [True]
+    assert held == [True, True]  # encode and generate
     assert not lock.is_held()
 
 
