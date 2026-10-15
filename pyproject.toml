@@ -53,6 +53,11 @@ dev = [
     "ty>=0.0.87",
 ]
 
+[tool.uv]
+# mflux declares torch, but nothing on our path needs it, and once installed transformers
+# imports it at runtime. Never install it (PLAN.md §8, M0a torch check).
+override-dependencies = ["torch; sys_platform == 'never'"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
