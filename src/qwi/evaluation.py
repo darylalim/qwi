@@ -27,7 +27,15 @@ from qwi.config import DEFAULTS
 from qwi.errors import EvalExists, EvalSetError, GenerationCancelled
 from qwi.events import CandidateReady, Event, RunStarted, StageFinished, StageStarted
 from qwi.lock import RunLock
-from qwi.pipeline import ENCODER, StageFactory, default_generate_stage, ignore_event
+from qwi.pipeline import (
+    ENCODER,
+    GuardFactory,
+    StageFactory,
+    default_generate_stage,
+    default_guard_stage,
+    ignore_event,
+)
+from qwi.stages import guard
 
 ROLES = ["image"]  # models this runner loads; guard + rewrite join it in M2 (§5.4 stage order)
 
@@ -266,3 +274,60 @@ def write_review(path: Path, prompts: list[EvalPrompt], rows: list[dict[str, Any
             for check in checks[row["id"]]:
                 item = f"{row['id']}_{row['seed']}"
                 writer.writerow([item, row["id"], row["seed"], row["image"], check, "", ""])
+
+
+# --- Guard false-positive set (§5.4 `eval/guard_allow.jsonl`) ------------------------------
+
+
+@dataclass(frozen=True)
+class GuardAllowRow:
+    id: str
+    prompt: str
+    might_trip: str  # the category a weak classifier might wrongly flag
+    result: guard.GuardResult
+
+    @property
+    def passed(self) -> bool:
+        """Pass = not blocked; a warning still passes (§5.4)."""
+        return self.result.decision != "block"
+
+
+def run_guard_allow(
+    mode: str = DEFAULTS.guard_mode,
+    path: Path | None = None,
+    make_guard: GuardFactory = default_guard_stage,
+    resolve: Callable[[str], Path] = models.resolve,
+    startup: Callable[[list[str]], None] = storage.startup,
+) -> list[GuardAllowRow]:
+    """Judge every prompt in the set with one guard load, under the run lock. Text only: seconds."""
+    path = path or paths.EVAL_SET / "guard_allow.jsonl"
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        cases = [(r["id"], r["prompt"], r["might_trip"]) for r in rows]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise EvalSetError(f"{path.name}: {exc}") from exc
+    policy = guard.load_policy()
+    with RunLock():
+        startup(["guard"])
+        preflight.check("guard", preflight.STATIC_GB["guard"])
+        stage = make_guard(resolve("guard"))
+        try:
+            stage.load()
+            verdicts = [stage(prompt) for _, prompt, _ in cases]
+        finally:
+            stage.unload()
+    results = [
+        GuardAllowRow(id_, prompt, trip, guard.decide(mode, verdict, policy=policy))
+        for (id_, prompt, trip), verdict in zip(cases, verdicts, strict=True)
+    ]
+    for row in results:
+        logs.event(
+            logging.INFO if row.passed else logging.WARNING,
+            "guard",
+            "guard_allow",
+            row.result.decision,
+            id=row.id,
+            level=row.result.input.level,
+            reason=row.result.reason,
+        )
+    return results

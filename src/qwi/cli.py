@@ -16,7 +16,7 @@ import typer
 from qwi import errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
-from qwi.evaluation import EvalRequest, EvalRunner
+from qwi.evaluation import EvalRequest, EvalRunner, run_guard_allow
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
@@ -298,6 +298,29 @@ def eval_run(
     if result.error:
         typer.echo(f"{result.error['type']}: {result.error['message']}", err=True)
     raise typer.Exit(errors.exit_code_for(result.status, (result.error or {}).get("type")))
+
+
+@eval_app.command("guard")
+def eval_guard(
+    guard_mode: Annotated[
+        GuardMode, typer.Option(help="Policy column to check against.")
+    ] = GUARD_MODE,
+) -> None:
+    """Run the guard false-positive set (eval/guard_allow.jsonl): pass = not blocked (§5.4)."""
+    logs.app_log()
+    try:
+        rows = run_guard_allow(guard_mode.value)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    width = max(len(row.id) for row in rows)
+    for row in rows:
+        mark = MARK["pass"] if row.passed else MARK["fail"]
+        verdict = row.result.input.describe()
+        typer.echo(f"{mark}  {row.id:<{width}}  {row.result.decision:<5}  {verdict}")
+    failed = [row.id for row in rows if not row.passed]
+    typer.echo(f"{len(rows) - len(failed)}/{len(rows)} not blocked (--guard-mode {guard_mode})")
+    if failed:
+        raise typer.Exit(1)
 
 
 def _session_dir(arg: str) -> Path:
