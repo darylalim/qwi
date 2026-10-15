@@ -5,7 +5,16 @@ import subprocess
 import sys
 
 HEAVY = ["mlx", "mflux", "mlx_lm", "mlx_vlm", "streamlit", "torch"]
-MODULES = ["qwi", "qwi.cli", "qwi.config", "qwi.errors", "qwi.memory", "qwi.stages.generate"]
+MODULES = [
+    "qwi",
+    "qwi.cli",
+    "qwi.config",
+    "qwi.errors",
+    "qwi.memory",
+    "qwi.models",
+    "qwi.paths",
+    "qwi.stages.generate",
+]
 
 
 def test_qwi_modules_import_no_heavy_libraries() -> None:

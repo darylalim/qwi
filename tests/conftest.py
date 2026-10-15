@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -26,3 +28,11 @@ def pytest_configure() -> None:
         except ImportError:
             return
         mx.set_default_device(mx.cpu)
+
+
+@pytest.fixture(autouse=True)
+def qwi_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test gets its own `$QWI_HOME`, so none can touch real runs (CLAUDE.md "Paths")."""
+    home = tmp_path / "qwi_home"
+    monkeypatch.setenv("QWI_HOME", str(home))
+    return home

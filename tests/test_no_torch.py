@@ -6,27 +6,16 @@ M1, M2 and M3 each add a test here for their new stage (PLAN.md §6).
 
 import gc
 import sys
-import tomllib
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 
 import qwi  # noqa: F401  # forces HF_HUB_OFFLINE=1 before huggingface_hub is imported
-from qwi import memory
+from qwi import memory, models
 from qwi.config import DEFAULTS
 from qwi.stages.generate import Generate
 
-from .conftest import ROOT
-
 pytestmark = pytest.mark.slow
-
-
-def snapshot(role: str) -> Path:
-    from huggingface_hub import snapshot_download
-
-    entry = tomllib.loads((ROOT / "models.toml").read_text())["roles"][role]
-    return Path(snapshot_download(entry["repo"], revision=entry["revision"], local_files_only=True))
 
 
 def assert_torch_free() -> None:
@@ -59,7 +48,7 @@ def test_qwen3_vl_processor_preprocesses_an_image(role: str) -> None:
     from mlx_vlm.utils import prepare_inputs
     from PIL import Image
 
-    model, processor = load(str(snapshot(role)), lazy=True)
+    model, processor = load(str(models.resolve(role)), lazy=True)
     prompt = apply_chat_template(processor, model.config, "Describe this image.", num_images=1)
     inputs = prepare_inputs(
         processor, images=[Image.new("RGB", (768, 768), "red")], prompts=[prompt]
@@ -72,7 +61,7 @@ def test_qwen3_vl_processor_preprocesses_an_image(role: str) -> None:
 def test_qwen_image_generates() -> None:
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
-    model = QwenImage21(model_path=str(snapshot("image")))
+    model = QwenImage21(model_path=str(models.resolve("image")))
     image = model.generate_image(
         seed=0, prompt="a red apple", num_inference_steps=2, width=256, height=256
     ).image
@@ -83,7 +72,7 @@ def test_qwen_image_generates() -> None:
 def test_generate_stage_runs_two_seeds() -> None:
     watchdog = memory.SwapWatchdog("generate")
     watchdog.start()
-    stage = Generate(snapshot("image"), watchdog=watchdog)
+    stage = Generate(models.resolve("image"), watchdog=watchdog)
     stage.load()
     try:
         candidates = stage("a red apple", [0, 1], width=256, height=256, steps=2)

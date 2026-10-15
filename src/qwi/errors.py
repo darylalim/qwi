@@ -16,3 +16,12 @@ class DeviceOutOfMemory(QwiError):
         super().__init__(f"Ran out of GPU memory during {stage}: {detail}")
         self.stage = stage
         self.detail = detail
+
+
+class ModelUnavailable(QwiError):
+    """A role's weights are missing at the pinned revision, or failed to load offline."""
+
+    def __init__(self, role: str, detail: str) -> None:
+        super().__init__(f"{role} model not available: {detail}. Run `qwi models fetch {role}`.")
+        self.role = role
+        self.detail = detail
