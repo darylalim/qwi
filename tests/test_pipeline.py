@@ -41,15 +41,16 @@ class FakeStage:
         self.callbacks = list(callbacks)
         self.loaded = self.unloaded = False
         self.fail_at: tuple[int, BaseException] | None = None
+        self.encoded: tuple[list[str], str] | None = None
 
     def load(self) -> None:
         self.loaded = True
 
-    def encode(self, prompt: str, encoder: str = "A-q4") -> PromptEmbeds:
+    def encode(self, prompts: Sequence[str], encoder: str = "A-q4") -> list[PromptEmbeds]:
         import mlx.core as mx
 
-        self.encoded = (prompt, encoder)
-        return PromptEmbeds(prompt, mx.zeros((1, 12, 8)), mx.ones((1, 12)), encoder)
+        self.encoded = (list(prompts), encoder)
+        return [PromptEmbeds(p, mx.zeros((1, 12, 8)), mx.ones((1, 12)), encoder) for p in prompts]
 
     def __call__(
         self, prompt: str, seeds: Sequence[int], *, width: int, height: int, steps: int

@@ -15,13 +15,16 @@ import typer
 from qwi import errors, lock, logs, record, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
+from qwi.evaluation import EvalRequest, EvalRunner
 from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
 from qwi.pipeline import GenerateRequest, Pipeline
 
 app = typer.Typer(no_args_is_help=True, help="Local text-to-image pipeline for Apple Silicon.")
 models_app = typer.Typer(no_args_is_help=True, help="Model weights (the only download path).")
 runs_app = typer.Typer(no_args_is_help=True, help="Past runs under $QWI_HOME/runs.")
+eval_app = typer.Typer(help="Eval set runs and blind review sessions (§5.4).")
 app.add_typer(models_app, name="models")
+app.add_typer(eval_app, name="eval")
 app.add_typer(runs_app, name="runs")
 
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
@@ -210,3 +213,50 @@ def runs_show(
         typer.echo("")
         for line in logs.read(log_path, level):
             _show_log_line(line)
+
+
+@eval_app.callback(invoke_without_command=True)
+def eval_run(
+    ctx: typer.Context,
+    variant: Annotated[
+        str | None, typer.Option(help="Name for this variant, e.g. baseline (required).")
+    ] = None,
+    seeds: Annotated[str, typer.Option(help="Comma-separated seeds.")] = ",".join(
+        map(str, DEFAULTS.eval_seeds)
+    ),
+    only: Annotated[
+        str | None, typer.Option(help="Comma-separated prompt ids (smoke runs).")
+    ] = None,
+    steps: Annotated[int, typer.Option(min=1)] = DEFAULTS.steps,
+    width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
+    height: Annotated[int, typer.Option(min=16)] = DEFAULTS.height,
+    allow_swap: Annotated[bool, typer.Option("--allow-swap")] = False,
+    verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False,
+) -> None:
+    """Generate the eval set (12 prompts x seeds) for one variant (§5.4 "Protocol")."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if variant is None:
+        raise typer.BadParameter("--variant is required", param_hint="--variant")
+    logs.app_log(verbose)
+    request = EvalRequest(
+        variant,
+        seeds=[int(s) for s in seeds.split(",")],
+        only=only.split(",") if only else None,
+        width=width,
+        height=height,
+        steps=steps,
+        allow_swap=allow_swap,
+        verbose=verbose,
+    )
+    try:
+        with cancel_on_signals(request.cancel):
+            result = EvalRunner().run(request, _render)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"{result.status}: {len(result.rows)} images")
+    typer.echo(f"  results  {result.results_dir}")
+    typer.echo(f"  images   {result.images_dir}")
+    if result.error:
+        typer.echo(f"{result.error['type']}: {result.error['message']}", err=True)
+    raise typer.Exit(errors.exit_code_for(result.status, (result.error or {}).get("type")))

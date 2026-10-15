@@ -11,6 +11,7 @@ class Defaults:
     height: int = 768
     steps: int = 20
     n: int = 4
+    eval_seeds: tuple[int, ...] = (1000, 1001)  # §5.4: fixed for every prompt and variant
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached
     # and macOS swaps (PLAN.md §4, §8 2026-10-15 "Swap cause found").
     cache_limit_bytes: int = 2 * GiB

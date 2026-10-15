@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -50,3 +51,15 @@ def detach_log_handlers() -> Iterator[None]:
         if handler not in before:
             logs.LOGGER.removeHandler(handler)
             handler.close()
+
+
+@pytest.fixture(autouse=True)
+def eval_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A copy of `eval/prompts.jsonl` in tmp, so no test writes into the repo's `eval/results/`."""
+    from qwi import paths
+
+    target = tmp_path / "eval_set"
+    target.mkdir()
+    shutil.copy(ROOT / "eval" / "prompts.jsonl", target / "prompts.jsonl")
+    monkeypatch.setattr(paths, "EVAL_SET", target)
+    return target

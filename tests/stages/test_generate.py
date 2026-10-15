@@ -154,7 +154,7 @@ def test_unload_drops_the_model() -> None:
 def test_encode_caches_the_embeddings_then_evicts_the_encoder(mlx_calls: list[str]) -> None:
     stage = Generate(Path("/w"))
     stage.load()
-    embeds = stage.encode("a red apple")
+    (embeds,) = stage.encode(["a red apple"])
     model = FakeQwenImage21.instances[0]
     assert model.text_encoder is None
     assert model.prompt_cache == {"a red apple": ("embeds:a red apple", "mask:a red apple")}
@@ -169,10 +169,19 @@ def test_encode_keys_an_empty_prompt_by_the_exact_string(prompt: str) -> None:
     # call the evicted encoder.
     stage = Generate(Path("/w"))
     stage.load()
-    stage.encode(prompt)
+    stage.encode([prompt])
     assert prompt in FakeQwenImage21.instances[0].prompt_cache
 
 
 def test_encode_before_load_is_an_error() -> None:
     with pytest.raises(RuntimeError, match="load"):
-        Generate(Path("/w")).encode("p")
+        Generate(Path("/w")).encode(["p"])
+
+
+def test_encode_batches_prompts_and_evicts_once(mlx_calls: list[str]) -> None:
+    stage = Generate(Path("/w"))
+    stage.load()
+    embeds = stage.encode(["a", "b", "a"])
+    assert [e.prompt for e in embeds] == ["a", "b"]  # duplicates encoded once
+    assert set(FakeQwenImage21.instances[0].prompt_cache) == {"a", "b"}
+    assert mlx_calls.count("clear_cache") == 1

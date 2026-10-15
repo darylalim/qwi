@@ -134,6 +134,18 @@ class RunNotFound(QwiError):
         self.run_id = run_id
 
 
+class EvalSetError(QwiError):
+    """`eval/prompts.jsonl` is malformed, or `qwi eval --only` names an unknown prompt id."""
+
+    status = None
+
+
+class EvalExists(QwiError):
+    """The variant's results folder already exists: eval results are never overwritten."""
+
+    status = None
+
+
 class GenerationCancelled(QwiError):
     """Cancel in the UI, or the first Ctrl-C in the CLI."""
 

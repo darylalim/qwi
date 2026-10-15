@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 MODELS_TOML = REPO / "models.toml"
+EVAL_SET = REPO / "eval"  # committed: prompts.jsonl, results/, sessions/ (§5.4, §5.7)
 
 
 def home() -> Path:
@@ -36,6 +37,11 @@ def eval_dir() -> Path:
 
 def logs_dir() -> Path:
     return home() / "logs"
+
+
+def eval_results_dir() -> Path:
+    """Committed per-variant `results.jsonl` + `review.csv`; the images live in `eval_dir()`."""
+    return EVAL_SET / "results"
 
 
 def new_run_dir(now: datetime | None = None) -> Path:
