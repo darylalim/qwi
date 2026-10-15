@@ -22,19 +22,23 @@ from qwi.errors import InsufficientMemory, SwapRisk
 
 HISTORY_RUNS = 10
 
-# Generate peak on the q4 pack with the 2 GiB cache cap, fitted as `a + b * megapixels` through
-# two measurements with the q4 encoder still loaded: 17.78 GB at 768² (M0b encoder residency) and
-# 37.92 GB at 2048² (M1 memory-limit test). The evicted encoder is 3.97 GB (§4: 13.82 GB at 768²).
-GENERATE_BASE_GB = 14.48
-GENERATE_GB_PER_MPX = 5.59
-ENCODER_Q4_GB = 3.97
+# Measured generate peaks (megapixels, GB) on the q4 pack with the q4 encoder still loaded:
+# 256² 2 steps 11.32 GiB (M0b weight source), 768² 17.78 GB (M0b encoder residency), 2048² 37.92 GB
+# (M1 memory-limit test). The peak isn't linear in pixels (~10.7 GB/Mpx below 768², ~5.6 above),
+# so estimates interpolate between neighbours and extend the end segments (§8 2026-10-15).
+GENERATE_PEAKS_GB = ((0.065536, 12.15), (0.589824, 17.78), (4.194304, 37.92))
+ENCODER_Q4_GB = 3.97  # evicted encoder: 13.82 GB at 768² (§4)
 
 # Weights only (§4) until M2/M3 measure each stage's peak.
 STATIC_GB = {"guard": 1.1, "rewrite": 6.5, "rerank": 2.5}
 
 
 def generate_gb(width: int, height: int, encoder_resident: bool = True) -> float:
-    gb = GENERATE_BASE_GB + GENERATE_GB_PER_MPX * width * height / 1e6
+    mpx = width * height / 1e6
+    points = GENERATE_PEAKS_GB
+    segment = next((i for i in range(1, len(points) - 1) if mpx <= points[i][0]), len(points) - 1)
+    (x0, y0), (x1, y1) = points[segment - 1], points[segment]
+    gb = y0 + (y1 - y0) * (mpx - x0) / (x1 - x0)
     return gb if encoder_resident else gb - ENCODER_Q4_GB
 
 
