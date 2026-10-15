@@ -1,0 +1,8 @@
+# GitHub Actions only: keeps the pinned action SHAs current. Python dependencies are not
+# auto-bumped; mflux is pinned exactly and model-adjacent upgrades need slow tests (PLAN.md §5.9).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,87 @@
+# Fast, model-free gates: the same checks as "All gates" (PLAN.md §5.5) and the hooks (§5.8).
+# Never downloads weights or runs models; slow tests stay local (§5.9).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HF_HUB_OFFLINE: "1" # a test can never trigger a model download
+  QWI_PIPELINE: fake # §5.6: UI/AppTest use FakePipeline
+  QWI_JOBS_SYNC: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: true
+      - run: uv sync --locked --only-group dev
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync ruff check --output-format=github
+
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Diff range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$PR_BASE...HEAD"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            range="4b825dc642cb6eb9a060e54bf8d69288fbee4904..HEAD" # first push: diff from the empty tree
+          else
+            range="$BEFORE..HEAD"
+          fi
+          echo "spec=$range" >> "$GITHUB_OUTPUT"
+      - name: File rules (H2, §5.8)
+        env:
+          RANGE: ${{ steps.range.outputs.spec }}
+        run: python3 -I .claude/hooks/pre_commit.py --range "$RANGE"
+      - name: Eval gate (§5.4)
+        if: github.event_name == 'pull_request'
+        env:
+          RANGE: ${{ steps.range.outputs.spec }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 -I .github/scripts/eval_gate.py --range "$RANGE"
+
+  test:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: QWI_HOME outside the checkout (§5.7)
+        run: echo "QWI_HOME=$RUNNER_TEMP/qwi" >> "$GITHUB_ENV" # `runner` context isn't allowed in env
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+          enable-cache: true
+      - run: uv sync --locked --all-extras
+      - run: uv run --no-sync ty check
+      - run: uv run --no-sync pytest

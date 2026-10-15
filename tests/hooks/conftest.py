@@ -1,6 +1,5 @@
 """Load and run the `.claude/hooks` scripts (PLAN.md §5.8 "Verification")."""
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -10,16 +9,13 @@ from types import ModuleType
 
 import pytest
 
-HOOKS_DIR = Path(__file__).resolve().parents[2] / ".claude" / "hooks"
+from ..conftest import ROOT, load_module
+
+HOOKS_DIR = ROOT / ".claude" / "hooks"
 
 
 def load_hook(name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(f"hook_{name}", HOOKS_DIR / f"{name}.py")
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module(HOOKS_DIR / f"{name}.py")
 
 
 def run_hook(name: str, payload: dict, project: Path) -> subprocess.CompletedProcess[str]:
@@ -48,3 +44,23 @@ def stage(repo: Path, name: str, data: bytes = b"x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     subprocess.run(["git", "add", name], cwd=repo, check=True)
+
+
+def commit(repo: Path, message: str = "c") -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", message],
+        cwd=repo,
+        check=True,
+    )
+
+
+def run_range(repo: Path, spec: str) -> subprocess.CompletedProcess[str]:
+    """`pre_commit.py --range <spec>` as CI's hygiene job runs it (§5.9)."""
+    return subprocess.run(
+        [sys.executable, "-I", str(HOOKS_DIR / "pre_commit.py"), "--range", spec],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CLAUDE_PROJECT_DIR": str(repo)},
+        check=False,
+        timeout=60,
+    )

@@ -19,6 +19,7 @@
       "Bash(mflux-save *)",
       "Bash(sudo *)",
       "Bash(git push *)",
+      "Bash(git push --tags*)",
       "Bash(git tag *)",
       "Bash(gh release *)"
     ]

@@ -1,11 +1,12 @@
 """Decision logic and no-toolchain paths of hooks H1-H4 (PLAN.md §5.8)."""
 
 import ast
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from .conftest import HOOKS_DIR, load_hook, run_hook, stage
+from .conftest import HOOKS_DIR, commit, load_hook, run_hook, run_range, stage
 
 py_format = load_hook("py_format")
 pre_commit = load_hook("pre_commit")
@@ -118,6 +119,63 @@ def test_pre_commit_ignores_other_commands(git_repo: Path) -> None:
     stage(git_repo, "model.safetensors")
     result = run_hook("pre_commit", {"tool_input": {"command": "git status"}}, git_repo)
     assert result.returncode == 0
+
+
+@pytest.fixture
+def repo_with_base(git_repo: Path) -> Path:
+    stage(git_repo, "README.md")
+    commit(git_repo, "base")
+    subprocess.run(["git", "tag", "base"], cwd=git_repo, check=True)
+    return git_repo
+
+
+@pytest.mark.parametrize(
+    ("name", "size", "reason"),
+    [
+        ("big.bin", 5 * 1024 * 1024 + 1, "5 MB"),
+        ("model.safetensors", 1, "weights"),
+        ("var/runs/run.json", 2, "var/"),
+    ],
+    ids=["oversized", "safetensors", "var"],  # keep payloads out of PYTEST_CURRENT_TEST
+)
+def test_pre_commit_range_flags_bad_commits(
+    repo_with_base: Path, name: str, size: int, reason: str
+) -> None:
+    stage(repo_with_base, "ok.py", b"x = 1\n")
+    commit(repo_with_base, "clean")
+    stage(repo_with_base, name, b"\0" * size)
+    commit(repo_with_base, "bad")
+    result = run_range(repo_with_base, "base...HEAD")
+    assert result.returncode == 1
+    assert name in result.stderr
+    assert reason in result.stderr
+
+
+def test_pre_commit_range_passes_clean_commits(repo_with_base: Path) -> None:
+    stage(repo_with_base, "src/qwi/a.py", b"x = 1\n")
+    stage(repo_with_base, "tests/fixtures/ok.png", b"png")
+    commit(repo_with_base, "clean")
+    result = run_range(repo_with_base, "base...HEAD")
+    assert result.returncode == 0, result.stderr
+
+
+def test_pre_commit_range_ignores_files_deleted_later(repo_with_base: Path) -> None:
+    # Only what the range adds or modifies counts, sized at its newer end.
+    stage(repo_with_base, "README.md", b"y")
+    commit(repo_with_base, "edit")
+    assert run_range(repo_with_base, "base").returncode == 0
+
+
+def test_pre_commit_range_bad_revision_fails(repo_with_base: Path) -> None:
+    assert run_range(repo_with_base, "nope...HEAD").returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("spec", "end"),
+    [("a...b", "b"), ("a..b", "b"), ("a...", "HEAD"), ("abc123", "HEAD")],
+)
+def test_pre_commit_range_end(spec: str, end: str) -> None:
+    assert pre_commit.range_end(spec) == end
 
 
 # H3: stop_gates
