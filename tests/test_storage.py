@@ -65,6 +65,8 @@ def test_home_not_writable(qwi_home: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_tree_bytes_counts_hard_links_once(tmp_path: Path) -> None:
+    tmp_path = tmp_path / "run"  # its own folder: tmp_path also holds the eval_set fixture
+    tmp_path.mkdir()
     candidate = tmp_path / "cand_0_seed0.png"
     candidate.write_bytes(b"x" * 1000)
     paths.link_best(candidate)

@@ -46,7 +46,7 @@ class GenerateRequest:
 class GenerateStage(Protocol):
     def load(self) -> None: ...
 
-    def encode(self, prompt: str, encoder: str = ...) -> PromptEmbeds: ...
+    def encode(self, prompts: Sequence[str], encoder: str = ...) -> list[PromptEmbeds]: ...
 
     def __call__(
         self, prompt: str, seeds: Sequence[int], *, width: int, height: int, steps: int
@@ -58,13 +58,13 @@ class GenerateStage(Protocol):
 StageFactory = Callable[[Path, Sequence[object], memory.SwapWatchdog], GenerateStage]
 
 
-def _generate_stage(
+def default_generate_stage(
     model_path: Path, callbacks: Sequence[object], watchdog: memory.SwapWatchdog
 ) -> GenerateStage:
     return Generate(model_path, callbacks=callbacks, watchdog=watchdog)
 
 
-def _ignore(_: Event) -> None:
+def ignore_event(_: Event) -> None:
     pass
 
 
@@ -87,7 +87,7 @@ class _ProgressHook:
 class Pipeline:
     def __init__(
         self,
-        make_generate: StageFactory = _generate_stage,
+        make_generate: StageFactory = default_generate_stage,
         resolve: Callable[[str], Path] = models.resolve,
         startup: Callable[[list[str]], None] = storage.startup,
     ) -> None:
@@ -97,7 +97,7 @@ class Pipeline:
         self._stage: str | None = None
 
     def run(
-        self, request: GenerateRequest, on_event: Callable[[Event], None] = _ignore
+        self, request: GenerateRequest, on_event: Callable[[Event], None] = ignore_event
     ) -> RunRecord:
         with RunLock():
             return self._run(request, on_event)
@@ -180,7 +180,7 @@ class Pipeline:
             encode_started = time.perf_counter()
             with memory.track_peak() as encode_peak:
                 generator.load()
-                embeds = generator.encode(request.prompt, ENCODER)
+                (embeds,) = generator.encode([request.prompt], ENCODER)
             self._finish_stage(rec, "encode", encode_started, encode_peak.gb, on_event)
             logs.event(logging.INFO, "encode", "encoded", "encoder evicted", tokens=embeds.tokens)
             record.write(rec, run)

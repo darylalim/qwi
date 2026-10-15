@@ -58,27 +58,33 @@ class Generate:
             model.callbacks.register(callback)
         self._model = model
 
-    def encode(self, prompt: str, encoder: str = "A-q4") -> PromptEmbeds:
-        """Encode `prompt` with mflux's recipe, cache it, then evict the text encoder (§4)."""
+    def encode(self, prompts: Sequence[str], encoder: str = "A-q4") -> list[PromptEmbeds]:
+        """Encode every prompt with mflux's recipe, cache them, then evict the encoder once (§4).
+
+        Batch runs (the eval runner) pass all their prompts, so the encoder loads once.
+        """
         import mlx.core as mx
         from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder import (
             Qwen21PromptEncoder,
         )
 
         model = self._require()
-        embeds, mask = Qwen21PromptEncoder.encode_prompt(
-            prompt=prompt,
-            prompt_cache={},
-            tokenizer=model.tokenizers["qwen21"],
-            text_encoder=model.text_encoder,
-        )
-        mx.eval(embeds, mask)  # materialize first, so evicting frees the weights now (§4)
-        # Keyed by the exact prompt: mflux encodes an empty prompt as " " but looks up the
-        # original string, which would miss and call the evicted encoder.
-        model.prompt_cache[prompt] = (embeds, mask)
+        out: list[PromptEmbeds] = []
+        for prompt in dict.fromkeys(prompts):  # each distinct prompt once, in order
+            embeds, mask = Qwen21PromptEncoder.encode_prompt(
+                prompt=prompt,
+                prompt_cache={},
+                tokenizer=model.tokenizers["qwen21"],
+                text_encoder=model.text_encoder,
+            )
+            mx.eval(embeds, mask)  # materialize first, so evicting frees the weights now (§4)
+            # Keyed by the exact prompt: mflux encodes an empty prompt as " " but looks up the
+            # original string, which would miss and call the evicted encoder.
+            model.prompt_cache[prompt] = (embeds, mask)
+            out.append(PromptEmbeds(prompt, embeds, mask, encoder))
         model.text_encoder = None  # ty: ignore[invalid-assignment]  # evict (mflux types it non-None)
         memory.evict()
-        return PromptEmbeds(prompt, embeds, mask, encoder)
+        return out
 
     def _require(self) -> "QwenImage21":
         if self._model is None:

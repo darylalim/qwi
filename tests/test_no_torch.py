@@ -13,6 +13,7 @@ import pytest
 import qwi  # noqa: F401  # forces HF_HUB_OFFLINE=1 before huggingface_hub is imported
 from qwi import memory, models
 from qwi.config import DEFAULTS
+from qwi.evaluation import EvalRequest, EvalRunner
 from qwi.events import DenoiseStep, Event
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.generate import Generate
@@ -90,7 +91,7 @@ def test_encode_then_generate_matches_stock_mflux() -> None:
     stage = Generate(models.resolve("image"), watchdog=watchdog)
     stage.load()
     try:
-        embeds = stage.encode("a red apple")
+        (embeds,) = stage.encode(["a red apple"])
         assert stage._model is not None
         assert stage._model.text_encoder is None
         candidates = list(stage("a red apple", [0, 1], width=256, height=256, steps=2))
@@ -115,4 +116,17 @@ def test_pipeline_runs_end_to_end() -> None:
     assert steps == [(0, 1, 2), (0, 2, 2), (1, 1, 2), (1, 2, 2)]
     assert 0 < rec.peak_mem_gb["generate"] < 24
     assert set(rec.timings_s) == {"encode", "generate"}
+    assert_torch_free()
+
+
+def test_eval_runner_smoke() -> None:
+    # Stage-batched eval on the real model; results go to the tmp eval set (conftest).
+    request = EvalRequest(
+        "smoke", seeds=[0], only=["count", "isolated"], width=256, height=256, steps=2
+    )
+    result = EvalRunner().run(request)
+    assert result.status == "ok", result.error
+    assert [row["id"] for row in result.rows] == ["count", "isolated"]
+    assert all((result.images_dir / row["image"]).is_file() for row in result.rows)
+    assert 0.0 <= result.rows[1]["white_border_share"] <= 1.0
     assert_torch_free()
