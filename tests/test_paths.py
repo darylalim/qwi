@@ -68,3 +68,8 @@ def test_run_json_paths_are_relative(tmp_path: Path) -> None:
     assert paths.relative(run / "cand_0_seed0.png", run) == "cand_0_seed0.png"
     with pytest.raises(ValueError, match="not in the subpath"):
         paths.relative(tmp_path / "elsewhere.png", run)
+
+
+def test_free_bytes_works_before_qwi_home_exists(qwi_home: Path) -> None:
+    assert not qwi_home.exists()
+    assert paths.free_bytes() > 0

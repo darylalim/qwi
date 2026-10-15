@@ -3,27 +3,46 @@ import pytest
 from qwi import memory
 from qwi.errors import DeviceOutOfMemory
 
-# Shape copied from /usr/bin/vm_stat on the M2 Max (macOS 26), trimmed.
+# Copied from /usr/bin/vm_stat on the M2 Max (macOS 26), trimmed; note the quoted key.
 VM_STAT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                                  1483722.
-Pages active:                                 213119.
-Swapins:                                      619608.
+Pages free:                                   893661.
+Pages active:                                 267761.
+Pages inactive:                               749056.
+Pages purgeable:                                8068.
+"Translation faults":                       43722768.
+Swapins:                                      625530.
 Swapouts:                                    1885391.
 """
 
 
-def test_parse_swapouts_uses_the_header_page_size() -> None:
-    assert memory.parse_swapouts(VM_STAT) == 1885391 * 16384
+def test_vm_stat_uses_the_header_page_size() -> None:
+    assert memory.parse_vm_stat(VM_STAT).swapout_bytes == 1885391 * 16384
     other_page = VM_STAT.replace("16384", "4096")
-    assert memory.parse_swapouts(other_page) == 1885391 * 4096
+    assert memory.parse_vm_stat(other_page).swapout_bytes == 1885391 * 4096
 
 
-@pytest.mark.parametrize("drop", ["page size", "Swapouts"])
-def test_parse_swapouts_rejects_unexpected_output(drop: str) -> None:
-    text = "\n".join(line for line in VM_STAT.splitlines() if drop not in line)
-    with pytest.raises(ValueError, match="vm_stat"):
-        memory.parse_swapouts(text)
+def test_vm_stat_available_is_free_plus_inactive_plus_purgeable() -> None:
+    stat = memory.parse_vm_stat(VM_STAT)
+    assert stat.available_bytes == (893661 + 749056 + 8068) * 16384
+    assert stat.pages["Translation faults"] == 43722768
+
+
+def test_vm_stat_rejects_output_without_a_page_size() -> None:
+    with pytest.raises(ValueError, match="page size"):
+        memory.parse_vm_stat(VM_STAT.splitlines(keepends=True)[1])
+
+
+def test_vm_stat_names_a_missing_counter() -> None:
+    text = VM_STAT.replace("Swapouts", "Swapped")
+    with pytest.raises(ValueError, match="no Swapouts line"):
+        _ = memory.parse_vm_stat(text).swapout_bytes
+
+
+def test_vm_stat_reads_this_machine() -> None:
+    stat = memory.vm_stat()
+    assert stat.swapout_bytes >= 0
+    assert stat.available_bytes > 0
 
 
 class Counter:
@@ -56,10 +75,6 @@ def test_watchdog_raises_device_out_of_memory_past_the_limit() -> None:
 def test_watchdog_needs_a_baseline() -> None:
     with pytest.raises(RuntimeError, match="start"):
         memory.SwapWatchdog("generate", read=Counter(0)).check()
-
-
-def test_swapouts_reads_this_machine() -> None:
-    assert memory.swapouts() >= 0
 
 
 def test_track_peak_resets_then_reads_mlx_peak(monkeypatch: pytest.MonkeyPatch) -> None:
