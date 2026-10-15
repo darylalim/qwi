@@ -11,6 +11,7 @@ from qwi.events import (
     CandidateReady,
     DenoiseStep,
     GuardVerdict,
+    RewriteReady,
     RunStarted,
     StageFinished,
     StageStarted,
@@ -148,6 +149,45 @@ def test_a_guard_block_prints_why_and_exits_2(monkeypatch: pytest.MonkeyPatch) -
     assert "Blocked by guard: input prompt is Controversial (Violent)" in result.stderr
 
 
+def test_rewrite_flags_reach_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    assert runner.invoke(cli.app, ["generate", "p"]).exit_code == 0
+    args = ["generate", "p", "--no-rewrite", "--rewrite-style", "long"]
+    assert runner.invoke(cli.app, args).exit_code == 0
+    assert [(r.rewrite, r.rewrite_style) for r in fake.requests] == [
+        (True, "short"),
+        (False, "long"),
+    ]
+
+
+class RewritingPipeline:
+    def __init__(self, fallback: str | None) -> None:
+        self.fallback = fallback
+
+    def __call__(self) -> "RewritingPipeline":
+        return self
+
+    def run(self, request, on_event) -> RunRecord:
+        on_event(RewriteReady("A glossy red apple on an oak table.", self.fallback, "short"))
+        return RunRecord(request.prompt, status="ok")
+
+
+def test_show_rewrite_prints_the_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Pipeline", RewritingPipeline(None))
+    shown = runner.invoke(cli.app, ["generate", "p", "--show-rewrite"])
+    assert "rewrite (short): A glossy red apple on an oak table." in shown.stdout
+    hidden = runner.invoke(cli.app, ["generate", "p"])
+    assert "rewrite (short)" not in hidden.output
+
+
+def test_a_rewrite_fallback_is_always_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Pipeline", RewritingPipeline("quoted_text_missing"))
+    result = runner.invoke(cli.app, ["generate", "p"])
+    assert result.exit_code == 0
+    assert "rewrite not used (quoted_text_missing): generating from your prompt" in result.stderr
+
+
 def test_generate_reports_busy_with_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
     from qwi.errors import PipelineBusy
 
@@ -191,6 +231,28 @@ def test_runs_show_prints_the_summary() -> None:
     assert "768x768, 20 steps, n=2, encoder A-q4, seeds [7, 8]" in out
     assert "cand 0  seed 7  cand_0_seed7.png  125.8 s  peak 13.8 GB" in out
     assert "swap     generate 0 GB" in out
+
+
+def test_runs_show_prints_the_guard_and_the_rewrite() -> None:
+    _saved_run(
+        "20261015-093005-abcdef",
+        status="ok",
+        guard={"mode": "default", "decision": "warn", "reason": "input:Controversial:Violent"},
+        rewritten_prompt="A knight on a misty battlefield.",
+    )
+    _saved_run(
+        "20261015-093006-abcdef",
+        status="ok",
+        guard={"mode": "strict", "decision": "allow", "reason": None},
+        rewritten_prompt="A storefront.",
+        rewrite_fallback_reason="quoted_text_missing",
+    )
+    first = runner.invoke(cli.app, ["runs", "show", "20261015-093005"]).output
+    assert "guard    warn (default): input:Controversial:Violent" in first
+    assert "rewrite  [used] A knight on a misty battlefield." in first
+    second = runner.invoke(cli.app, ["runs", "show", "20261015-093006"]).output
+    assert "guard    allow (strict)\n" in second
+    assert "rewrite  [not used: quoted_text_missing] A storefront." in second
 
 
 def test_runs_show_repairs_an_interrupted_run() -> None:

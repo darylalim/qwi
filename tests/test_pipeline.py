@@ -23,13 +23,14 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RewriteReady,
     RunStarted,
     StageFinished,
     StageStarted,
 )
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
-from qwi.stages import guard
+from qwi.stages import guard, rewrite
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate
 
@@ -99,6 +100,28 @@ class FakeGuard:
 
 
 SAFE = "Safety: Safe\nCategories: None"
+REWRITE = "A glossy red apple on a wooden table, soft window light from the left"
+
+
+class FakeRewrite:
+    """Returns a fixed model reply, post-processed like the real stage."""
+
+    def __init__(self, raw: str, style: str) -> None:
+        self.raw, self.style = raw, style
+        self.seen: list[str] = []
+        self.loaded = self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def __call__(self, prompt: str) -> rewrite.Rewritten:
+        self.seen.append(prompt)
+        text = rewrite.clean(self.raw)
+        final, reason = rewrite.postprocess(prompt, text, 200)
+        return rewrite.Rewritten(final, text, reason, self.style)
+
+    def unload(self) -> None:
+        self.unloaded = True
 
 
 class Harness:
@@ -111,12 +134,19 @@ class Harness:
         self.startup: Callable[[list[str]], None] = lambda roles: None
         self.guard_reply = SAFE
         self.guards: list[FakeGuard] = []
+        self.rewrite_reply = REWRITE
+        self.rewriters: list[FakeRewrite] = []
         self.pipeline = Pipeline(
             self._make,
             resolve=self._resolve,
             startup=lambda r: self.startup(r),
             make_guard=self._make_guard,
+            make_rewrite=self._make_rewrite,
         )
+
+    def _make_rewrite(self, model_path: Path, style: str) -> FakeRewrite:
+        self.rewriters.append(FakeRewrite(self.rewrite_reply, style))
+        return self.rewriters[-1]
 
     def _make_guard(self, model_path: Path) -> FakeGuard:
         self.guards.append(FakeGuard(self.guard_reply))
@@ -180,18 +210,24 @@ def test_a_run_writes_candidates_and_a_final_record(h: Harness) -> None:
         "n": 3,
         "steps": 2,
         "encoder": "A-q4",
+        "rewrite": "short",
         "base_seed": 100,
         "allow_swap": False,
     }
     assert rec.preflight["generate"]["decision"] == "ok"
     assert rec.peak_mem_gb["generate"] == pytest.approx(14.0)
-    assert rec.swap_gb == {"guard": 0.0, "generate": 0.0}
-    assert set(rec.timings_s) == {"guard", "encode", "generate"}
-    assert set(rec.model_revisions) == {"guard", "image"}
-    assert h.resolved == ["guard", "image"]
+    assert rec.swap_gb == {"guard": 0.0, "rewrite": 0.0, "generate": 0.0}
+    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate"}
+    assert set(rec.model_revisions) == {"guard", "rewrite", "image"}
+    assert h.resolved == ["guard", "rewrite", "image"]
+    assert (rec.rewritten_prompt, rec.rewrite_fallback_reason) == (REWRITE, None)
+    assert (rec.prompt_source, rec.rerank_query) == ("rewrite", "a red apple")
     assert rec.guard["decision"] == "allow"
-    assert h.guards[0].seen == ["a red apple"]
+    assert rec.guard["rewrite"]["level"] == "Safe"
+    assert h.guards[0].seen == ["a red apple", REWRITE]  # input pass, then the rewrite pass
+    assert h.stages[0].encoded == ([REWRITE], "A-q4")  # generation uses the rewrite
     assert (h.guards[0].loaded, h.guards[0].unloaded) == (True, True)
+    assert (h.rewriters[0].loaded, h.rewriters[0].unloaded) == (True, True)
     assert h.stages[0].loaded
     assert h.stages[0].unloaded
 
@@ -202,6 +238,10 @@ def test_events_arrive_in_order(h: Harness) -> None:
         "RunStarted",
         "StageStarted",
         "StageFinished",
+        "GuardVerdict",
+        "StageStarted",
+        "StageFinished",
+        "RewriteReady",
         "GuardVerdict",
         "StageStarted",
         "StageFinished",
@@ -221,7 +261,7 @@ def test_events_arrive_in_order(h: Harness) -> None:
     ]
     assert isinstance(h.events[0], RunStarted)
     assert h.events[0].seeds == [100, 101]
-    stages = ["guard", "encode", "generate"]
+    stages = ["guard", "rewrite", "encode", "generate"]
     assert [e.stage for e in h.events if isinstance(e, StageStarted)] == stages
     assert [e.stage for e in h.events if isinstance(e, StageFinished)] == stages
     ready = [e for e in h.events if isinstance(e, CandidateReady)]
@@ -333,8 +373,8 @@ def test_allow_swap_runs_and_records_the_decision(
 
 
 def test_swap_during_the_stage_is_recorded(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    # guard: pre-flight, watchdog start, delta; generate: pre-flight, watchdog start, then swap.
-    readings = iter([vm(30 * 10**9, swapouts=0)] * 5)
+    # guard, rewrite: pre-flight, watchdog start, delta; generate: pre-flight, start, then swap.
+    readings = iter([vm(30 * 10**9, swapouts=0)] * 8)
     swapped = vm(30 * 10**9, swapouts=6104)  # pages: 6104 x 16 KiB = 0.1 GB
     monkeypatch.setattr(memory, "vm_stat", lambda: next(readings, swapped))
     rec = h.run()
@@ -353,7 +393,7 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
         held.append(lock.is_held()) if isinstance(event, StageStarted) else None
     )
     h.run()
-    assert held == [True, True, True]  # guard, encode and generate
+    assert held == [True] * 4  # guard, rewrite, encode and generate
     assert not lock.is_held()
 
 
@@ -523,12 +563,13 @@ def test_a_guard_warning_is_logged_and_the_run_continues(h: Harness) -> None:
     assert rec.status == "ok"
     assert (rec.guard["decision"], rec.guard["reason"]) == ("warn", "input:Controversial:Violent")
     assert len(rec.candidates) == 3
-    (line,) = logs.read(run_dir(rec) / "run.log", "warning")
-    assert (line["event"], line["msg"], line["reason"]) == (
-        "guard_verdict",
-        "warn",
-        "input:Controversial:Violent",
-    )
+    lines = logs.read(run_dir(rec) / "run.log", "warning")
+    # The fake guard answers both passes the same way: one warning per pass.
+    assert [(x["event"], x["msg"], x["check"]) for x in lines] == [
+        ("guard_verdict", "warn", "input"),
+        ("guard_verdict", "warn", "rewrite"),
+    ]
+    assert lines[1]["reason"] == "input:Controversial:Violent"  # the input wins a tie
 
 
 def test_guard_mode_selects_the_policy_column(h: Harness) -> None:
@@ -556,4 +597,105 @@ def test_a_guard_failure_is_an_error_in_the_guard_stage(
     assert rec.error is not None
     assert (rec.error["type"], rec.error["stage"]) == ("DeviceOutOfMemory", "guard")
     assert h.guards[0].unloaded
+    assert h.stages == []
+
+
+# --- Rewrite (§5.1) and the guard's second pass (§5.2) -------------------------------------
+
+
+def test_the_guard_stays_loaded_through_the_rewrite(h: Harness) -> None:
+    loaded_during_rewrite: list[bool] = []
+    real_call = FakeRewrite.__call__
+
+    def spy(self: FakeRewrite, prompt: str) -> rewrite.Rewritten:
+        loaded_during_rewrite.append(not h.guards[0].unloaded)
+        return real_call(self, prompt)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(FakeRewrite, "__call__", spy)
+        rec = h.run()
+    assert rec.status == "ok"
+    assert loaded_during_rewrite == [True]
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (
+        True,
+        True,
+    )  # both gone before encoding
+
+
+def test_no_rewrite_skips_the_stage_and_the_second_pass(h: Harness) -> None:
+    rec = h.run(rewrite=False)
+    assert rec.status == "ok"
+    assert h.rewriters == []
+    assert h.resolved == ["guard", "image"]
+    assert set(rec.model_revisions) == {"guard", "image"}
+    assert rec.config["rewrite"] == "none"
+    assert (rec.rewritten_prompt, rec.prompt_source, rec.guard["rewrite"]) == ("", "user", None)
+    assert h.guards[0].seen == ["a red apple"]
+    assert h.stages[0].encoded == (["a red apple"], "A-q4")
+    assert "rewrite" not in rec.timings_s
+    assert not any(isinstance(e, RewriteReady) for e in h.events)
+
+
+def test_rewrite_style_reaches_the_stage_and_the_record(h: Harness) -> None:
+    rec = h.run(rewrite_style="long")
+    assert h.rewriters[0].style == "long"
+    assert rec.config["rewrite"] == "long"
+
+
+def test_a_fallback_generates_from_the_user_prompt_without_a_second_pass(h: Harness) -> None:
+    h.rewrite_reply = "Prompt: An apple, lovingly described."
+    request_prompt = 'a crate stamped "FUJI"'
+    rec = h.pipeline.run(
+        GenerateRequest(request_prompt, n=1, steps=1, width=64, height=64, seed=1), h._emit
+    )
+    assert rec.status == "ok"
+    assert rec.rewrite_fallback_reason == "quoted_text_missing"
+    assert (rec.rewritten_prompt, rec.prompt_source) == ("An apple, lovingly described.", "user")
+    assert h.guards[0].seen == [request_prompt]  # the input was already checked
+    assert rec.guard["rewrite"] is None
+    assert h.stages[0].encoded == ([request_prompt], "A-q4")
+    (ready,) = [e for e in h.events if isinstance(e, RewriteReady)]
+    assert (ready.fallback_reason, ready.style) == ("quoted_text_missing", "short")
+    (line,) = logs.read(run_dir(rec) / "run.log", "warning")
+    assert (line["event"], line["msg"]) == ("rewrite_ready", "fallback: quoted_text_missing")
+
+
+def test_a_block_on_the_rewrite_pass_ends_the_run(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def judge(self: FakeGuard, text: str) -> guard.Verdict:
+        self.seen.append(text)
+        unsafe = "Safety: Unsafe\nCategories: Violent"
+        return guard.parse(SAFE if text == "a red apple" else unsafe)
+
+    monkeypatch.setattr(FakeGuard, "__call__", judge)
+    rec = h.run()
+    assert rec.status == "blocked"
+    assert errors.exit_code_for(rec.status) == 2
+    assert (rec.guard["decision"], rec.guard["reason"]) == ("block", "rewrite:Unsafe:Violent")
+    assert rec.guard["input"]["level"] == "Safe"
+    assert rec.rewritten_prompt == REWRITE  # recorded before the block, for the record
+    assert h.stages == []
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
+    verdicts = [(e.check, e.decision) for e in h.events if isinstance(e, GuardVerdict)]
+    assert verdicts == [("input", "allow"), ("rewrite", "block")]
+
+
+def test_an_input_block_never_builds_the_rewriter(h: Harness) -> None:
+    h.guard_reply = "Safety: Unsafe\nCategories: Jailbreak"
+    rec = h.run()
+    assert (rec.status, h.rewriters, h.resolved) == ("blocked", [], ["guard"])
+
+
+def test_a_rewrite_failure_is_an_error_in_the_rewrite_stage(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: FakeRewrite, prompt: str) -> rewrite.Rewritten:
+        raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+
+    monkeypatch.setattr(FakeRewrite, "__call__", broken)
+    rec = h.run()
+    assert rec.error is not None
+    assert (rec.error["type"], rec.error["stage"]) == ("DeviceOutOfMemory", "rewrite")
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
     assert h.stages == []

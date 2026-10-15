@@ -72,6 +72,11 @@ class Verdict:
         return f"{self.level} ({', '.join(self.categories)})" if self.categories else self.level
 
 
+def describe_pass(check: str, verdict: Verdict, mode: str) -> str:
+    """One console line for a pass: which pass, level, categories, mode."""
+    return f"{check} prompt is {verdict.describe()} (--guard-mode {mode})"
+
+
 def parse(raw: str) -> Verdict:
     safety = _SAFETY.search(raw)
     if safety is None:
@@ -129,7 +134,7 @@ class GuardResult:
             return self.decision
         verdict = self.rewrite if self.trigger == "rewrite" else self.input
         assert verdict is not None
-        return f"{self.trigger} prompt is {verdict.describe()} (--guard-mode {self.mode})"
+        return describe_pass(self.trigger, verdict, self.mode)
 
     def as_record(self) -> dict[str, Any]:
         return {

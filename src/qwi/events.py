@@ -1,6 +1,6 @@
 """Typed pipeline events (PLAN.md §5.6): `Pipeline.run` emits them; the CLI and UI render them.
 
-M2 adds `GuardVerdict` (and `RewriteReady` with the rewrite stage), M3 adds `RerankDone`.
+M2 adds `GuardVerdict` and `RewriteReady`, M3 adds `RerankDone`.
 """
 
 from dataclasses import dataclass
@@ -30,8 +30,15 @@ class GuardVerdict:
     check: str  # "input" | "rewrite": which pass (§5.2)
     level: str | None  # Safe | Unsafe | Controversial; None when unparseable
     categories: tuple[str, ...]
-    decision: str  # allow | warn | block, after both passes so far
+    decision: str  # allow | warn | block: this pass's own action
     summary: str  # one line: pass, level, categories, mode
+
+
+@dataclass(frozen=True)
+class RewriteReady:
+    text: str  # the cleaned rewrite, also when it isn't used
+    fallback_reason: str | None  # None: generation uses the rewrite (§5.1)
+    style: str
 
 
 @dataclass(frozen=True)
@@ -48,4 +55,12 @@ class CandidateReady:
     path: Path
 
 
-Event = RunStarted | StageStarted | StageFinished | GuardVerdict | DenoiseStep | CandidateReady
+Event = (
+    RunStarted
+    | StageStarted
+    | StageFinished
+    | GuardVerdict
+    | RewriteReady
+    | DenoiseStep
+    | CandidateReady
+)
