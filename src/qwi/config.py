@@ -12,6 +12,10 @@ class Defaults:
     steps: int = 20
     n: int = 4
     eval_seeds: tuple[int, ...] = (1000, 1001)  # §5.4: fixed for every prompt and variant
+    # --guard-mode: how Controversial verdicts are handled (PLAN.md §5.2, guard_policy.toml).
+    guard_mode: str = "default"
+    # The guard replies with two short lines; greedy decoding makes the verdict deterministic.
+    guard_max_tokens: int = 64
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached
     # and macOS swaps (PLAN.md §4, §8 2026-10-15 "Swap cause found").
     cache_limit_bytes: int = 2 * GiB

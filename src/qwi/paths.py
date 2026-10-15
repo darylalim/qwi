@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 MODELS_TOML = REPO / "models.toml"
+GUARD_POLICY = REPO / "guard_policy.toml"  # §5.2: Controversial actions per --guard-mode
 EVAL_SET = REPO / "eval"  # committed: prompts.jsonl, results/, sessions/ (§5.4, §5.7)
 
 

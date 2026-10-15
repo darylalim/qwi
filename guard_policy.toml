@@ -1,0 +1,17 @@
+# Guard decision table for Controversial verdicts, per --guard-mode (PLAN.md §5.2).
+# Unsafe always blocks and Safe always allows, in every mode: neither is configurable here.
+# When the guard lists several categories, the most restrictive action wins (block > warn > allow).
+# "None" covers a Controversial verdict with no category. Any change needs the guard eval re-run
+# (eval/guard_allow.jsonl, §5.4 "Re-run triggers").
+
+[controversial]
+"Sexual Content or Sexual Acts" = { strict = "block", default = "block", loose = "warn" }
+"Violent" = { strict = "block", default = "warn", loose = "warn" }
+"Suicide & Self-Harm" = { strict = "block", default = "block", loose = "warn" }
+"Non-violent Illegal Acts" = { strict = "block", default = "warn", loose = "warn" }
+"PII" = { strict = "block", default = "warn", loose = "warn" }
+"Unethical Acts" = { strict = "block", default = "warn", loose = "allow" }
+"Politically Sensitive Topics" = { strict = "block", default = "warn", loose = "allow" }
+"Copyright Violation" = { strict = "block", default = "warn", loose = "allow" }
+"Jailbreak" = { strict = "block", default = "block", loose = "warn" }
+"None" = { strict = "block", default = "warn", loose = "allow" }

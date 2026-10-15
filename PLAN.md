@@ -334,7 +334,7 @@ The guard (1.1 GB) **stays resident through Stage 2**, alongside Qwen3-VL-8B (5.
 
 - When the guard lists several categories, the **most restrictive action wins**.
 - The default mode is `default`, and the table lives in `guard_policy.toml` so it can be edited without code changes.
-- **Fail closed:** if the output can't be parsed (no `Safety:` line), block with reason `guard_parse_error`. Greedy decoding makes retries pointless.
+- **Fail closed:** if the output can't be parsed (no `Safety:` line), block with reason `<pass>:guard_parse_error` (e.g. `input:guard_parse_error`, §8 2026-10-15). Greedy decoding makes retries pointless.
 
 **What happens:**
 - `block`: print the level, categories, and which pass triggered it. Write `run.json` without images and exit with **code 2** (distinct from 1, a crash).
@@ -348,7 +348,7 @@ guard: {
   "input":   {"level": "Safe", "categories": [], "raw": "..."},
   "rewrite": {"level": "Safe", "categories": [], "raw": "..."} | None,
   "decision": "allow" | "warn" | "block",
-  "reason": str | None,   # e.g. "input:Controversial:Violent", "guard_parse_error"
+  "reason": str | None,   # "<pass>:<detail>", e.g. "input:Controversial:Violent", "rewrite:Unsafe:PII", "input:guard_parse_error"
 }
 ```
 
@@ -1483,8 +1483,8 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 - **Exit:** `qwi generate "..." -n 4` writes 4 images + `run.json` with timings/peak memory, no swap. `qwi eval --variant baseline` produces 24 images.
 
 ### M2 — Guard + Rewrite
-- [ ] `guard.py` + `guard_policy.toml`: load with mlx-lm, two passes (input and rewrite), and the parser, decision rules, exit code, and record format from §5.2. Add the `--guard-mode {strict,default,loose}` flag.
-- [ ] Unit-test the parser and policy table (see the §5.2 tests).
+- [x] `guard.py` + `guard_policy.toml`: load with mlx-lm, two passes (input and rewrite), and the parser, decision rules, exit code, and record format from §5.2. Add the `--guard-mode {strict,default,loose}` flag.
+- [x] Unit-test the parser and policy table (see the §5.2 tests). *(Landed with the guard task: `tests/stages/test_guard.py`.)*
 - [ ] Run `eval/guard_allow.jsonl` in `default` mode: all 6 should pass (not blocked). If any are blocked, adjust `guard_policy.toml` and log the change in §8.
 - [ ] `rewrite.py`: Qwen3-VL-8B via mlx-vlm (text-only chat), using the system prompt, settings, and post-processing guards from §5.1. Add the `--no-rewrite` / `--show-rewrite` flags, plus `--rewrite-style short|long` (§5.1).
 - [ ] **Minimal Eval review app (session mode, §5.4/§5.6):** `qwi eval review <session>` launches a single-page Streamlit app (just the server settings from `.streamlit/config.toml`; theme comes in M5c) that shows blind pairs and writes `review.csv`, with AppTest tests. **It's needed here** because the M2–M4 decisions depend on blind human review. M5b folds it into the full UI.
@@ -1618,6 +1618,7 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 | 2026-10-15 | **M1 exit runs: the Exit line holds.** On the M2 Max, `main` @ `e468791`, defaults (768², 20 steps, A-q4 with eviction), offline. **`qwi generate "a red apple on a wooden table" -n 4`** (run `20261015-103243-3abc4b`): status ok, 4 candidates + `run.json`; encode 1.63 s (peak 4.34 GB, encoder evicted); 122.6–123.9 s per image (6.05–6.1 s/step); generate peak 14.67–14.84 GB; **swap 0**; pre-flight est 13.81 vs avail 14.74 GB (after headroom) → ok. **`qwi eval --variant baseline`** (`eval/results/2026-10-15_baseline/`, committed as M2's "A" side): **24 images** (12 prompts × 1000/1001), **0 swap on every image**, median 123.6 s per image (123.3–124.2), generate peak 14.73–14.95 GB, pre-flight est 13.81 vs avail 18.83 GB; `isolated` white-border share 1.0 on both seeds; `review.csv` has 62 check rows. **Correction: the evicted generate estimate was ≈ 1.1 GB low** on all 28 images (13.81 vs 14.67–14.95 GB). M0b's 13.82 GB came from a bare `generate_image` after eviction, not the pipeline path. `preflight.EVICTED_SAVING_GB` = 2.83 (17.78 resident − 14.95 evicted, the exit runs' max) replaces subtracting the encoder's full 3.97 GB, so 768² now estimates 14.95 GB. Note the eval runner's pre-flight uses only the static estimate (no run history, which only `Pipeline.run` consults), so the static number has to be right on its own. **0.1.0** is bumped in the same PR | Every M1 task is ticked and both exit commands passed on the target machine, so the minor bump marks a verified milestone (§5.9) |
 | 2026-10-15 | **Release title = the tag (`v0.1.0`), not `qwi 0.1.0`.** `release.yml` passes `--title "v$VERSION"`; the existing 0.1.0 release was renamed with `gh release edit v0.1.0 --title v0.1.0` (title only; tag and assets unchanged) | The release page already sits under the repo name, so the `qwi` prefix was redundant, and the title now matches the tag shown beside it. Explicit `--title` rather than relying on GitHub falling back to the tag name |
 | 2026-10-15 | **Repo setting: automatically delete head branches = on** (`delete_branch_on_merge: true`, via the API). The 10 merged M0b branches (PRs #3–#12) that were still on GitHub were deleted, each with 0 commits not on `main` | Those PRs were merged without `--delete-branch`, so their branches lingered; the setting removes a branch on merge whichever way the PR is merged. Merge commits keep every branch commit on `main`, so deleting a merged branch loses nothing |
+| 2026-10-15 | **Guard stage (M2), as built.** `stages/guard.py`: `parse()` (the card's regexes; "None" dropped, duplicates removed, order kept; no `Safety:` line → `level: None`), `load_policy()` (`guard_policy.toml` at the repo root, `[controversial]` rows `category = {strict, default, loose}`, checked for every category + `None`, every mode, a known action), `judge()` (one pass) and `decide(mode, input, rewrite=None)` (most restrictive pass wins, input on a tie), `Guard` (mlx-lm `load` + `generate`, user turn only, `max_tokens=64`, no sampler = greedy). **Reason format is always `<pass>:<detail>`**, including `input:guard_parse_error`, so the record says which pass blocked (§5.2 updated). Unsafe with no category → `input:Unsafe`. The pipeline runs the **input pass only** as stage `guard` (pre-flight, peak, swap, `GuardVerdict` event, `run.json` `guard`), then **evicts the guard**: it stays resident and runs the second pass once `rewrite.py` lands (`decide()` already takes both verdicts). `GuardBlocked` → status `blocked`, exit 2, no image model loaded. `--guard-mode` is a `GuardMode` `StrEnum` (default from `config.py`). Pre-flight guard estimate = **1.74 GB**, the M0b smoke peak (1.62 GiB), not the 1.1 GB weights. The eval runner keeps its own `ROLES = ["image"]` and doesn't run the guard yet (§9 eval pre-flight question still open). NOTICE credits the card's Apache-2.0 regexes (§5.10) | The rewrite pass needs `rewrite.py`; wiring it now would be dead code. A pass-prefixed reason is one format for every case, and the UI's block banner needs the pass anyway |
 ---
 
 ## 9. Open questions
