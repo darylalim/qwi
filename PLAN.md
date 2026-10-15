@@ -1053,7 +1053,7 @@ Everything here lives in **`.claude/settings.json` (committed)**. Personal tweak
   "permissions": {
     "deny": [
       "Bash(pip install *)", "Bash(pip3 install *)", "Bash(uv pip install *)",
-      "Edit(uv.lock)", "Edit(var/**)", "Edit(eval/results/**/*.png)"
+      "Edit(/uv.lock)", "Edit(/var/**)", "Edit(/eval/results/**/*.png)"
     ],
     "ask": [
       "Bash(hf download *)", "Bash(huggingface-cli download *)",
@@ -1067,7 +1067,7 @@ Everything here lives in **`.claude/settings.json` (committed)**. Personal tweak
 }
 ```
 
-- **deny:** dependencies change only through `uv add` / `uv remove`; `uv.lock` is only written by uv; `var/` (`$QWI_HOME`) is runtime data.
+- **deny:** paths are root-anchored with a leading `/` (an unanchored `Edit(uv.lock)` matches at any depth). Dependencies change only through `uv add` / `uv remove`; `uv.lock` is only written by uv; `var/` (`$QWI_HOME`) is runtime data.
 - **ask:** anything that downloads or deletes GBs of weights, runs a real model (minutes of GPU and about 20 GB of RAM), or uses `sudo` (e.g. `iogpu.wired_limit_mb`, §4). The human decides each time.
 
 #### Hooks (`.claude/hooks/*.py`, Python standard library only, run with `python3 -I`)
@@ -1423,7 +1423,7 @@ M5a (needs M1 events/cancel/lock/errors, M2 rewrite stage, M3 rerank) ─► M5b
 Everything here is static: project files, tooling, guardrails, and dependency resolution. It can be done (and reviewed) without touching the 48 GB disk budget or loading a model.
 
 - [x] Scaffold per §5.5: `uv init --package --python 3.12`, `uv python pin 3.12`, `uv add mflux mlx-lm mlx-vlm pillow typer` (then pin mflux exactly), `uv add --dev ruff ty pytest`. Paste in the §5.5 tooling config, set `description`/`keywords` from §5.9 "Repo metadata" (with `tests/test_metadata.py`), and confirm the "All gates" command passes on the empty package.
-- [ ] **Claude Code guardrails (§5.8):** add `.claude/settings.json` (permission rules + hooks H1–H4) and `.claude/hooks/*.py` with their `tests/hooks/` fast tests. Pipe-test each script and prove H1 and H2 fire. Do this right after the scaffold, so every later step (and M0b) runs under the hooks.
+- [x] **Claude Code guardrails (§5.8):** add `.claude/settings.json` (permission rules + hooks H1–H4) and `.claude/hooks/*.py` with their `tests/hooks/` fast tests. Pipe-test each script and prove H1 and H2 fire. Do this right after the scaffold, so every later step (and M0b) runs under the hooks.
 - [ ] **`.gitignore` (§5.7):** add the exact file from §5.7 and `tests/test_gitignore.py`; confirm `git status` is clean after `uv sync` and one CLI smoke run.
 - [ ] **License (§5.10):** add `LICENSE` (Apache-2.0), `NOTICE`, and the README "Model licenses" section; add the `license` / `license-files` fields to `pyproject.toml` and a `license` field per role to `models.toml`; add the §5.10 fast tests.
 - [ ] **CI (§5.9):** add `ci.yml`, `release.yml` + `release_gate.py` (with fast tests), `dependabot.yml`, and the PR template; give `pre_commit.py` a `--range` mode with its fast test; run `actionlint`.
@@ -1566,6 +1566,7 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 | 2026-10-14 | Gap review fixes: **no transparent output** (mflux txt2img decodes RGB only; RGBA needs the edit variant, now out of scope): `rgba` eval prompt → `isolated` (plain white), rewriter rule 6 updated; **bf16 reference encoder** for M4 via `text_encoder/`-only download when needed; **stage-batched eval runner** under the run lock; **M0b mlx-vlm/mlx-lm smoke test**; **lazy model-library imports** + `test_imports.py`; **`config.py` single source of defaults** + CLI reference; **eval images in `$QWI_HOME/eval`**; README outline in M5c; option C wording clarified; **ports 8501/8502**; restored the automated eval checks dropped in the protocol rewrite | Verified against mflux source (`models/qwen21/README.md`); each fix removes a wrong assumption, a hidden cost (model reloads, import time, untracked disk), or a scattered definition before implementation starts |
 | 2026-10-14 | M0a scaffold: package version starts at **`0.0.0`** (`uv init` writes `0.1.0`; reset with `uv version 0.0.0`). Resolved: mflux 0.22.0, mlx-lm 0.32.0, mlx-vlm 0.7.8, pillow 12.3.0, typer 0.27.3, streamlit 1.66.0 (`ui` extra), ruff 0.17.0, ty 0.0.87, pytest 9.1.1, CPython 3.12.15. `license`/`license-files` wait for the §5.10 task (uv_build fails on missing `LICENSE`) | §6 reserves `0.1.0` for the M1 release, and the §5.9 release gate fails on downgrades, so the first release must be a real bump |
 | 2026-10-14 | ruff: `extend-exclude = ["*.md"]` (§5.5) | Observed: ruff 0.17 formats Python code blocks in Markdown, so a bare `ruff format` rewrote the `PLAN.md` samples and `format --check` would fail on the untouched plan. The samples are specs (comment alignment, abbreviated dicts), not code |
+| 2026-10-14 | Guardrails (§5.8) as built, checked against the Claude Code hooks/permissions docs on v2.1.300: **root-anchored path rules** (`Edit(/uv.lock)`, `Edit(/var/**)`, `Edit(/eval/results/**/*.png)`; unanchored ones match at any depth; Edit rules also cover Write and shell redirects); `if` is best-effort, so `pre_commit.py` re-checks the command itself; `onFailure` needs v2.1.295+; hooks share `.claude/hooks/_common.py` (put on `sys.path` explicitly, since `-I` leaves the script dir off) and stay **Python 3.9-compatible** (`/usr/bin/python3` may come first on PATH; a fast test parses them as 3.9). Verified in-session: H1 reformatted a probe edit and returned lint errors via exit 2; H2 blocked a commit on lint and again on a failing test. **Observed:** H2 runs before the whole Bash command, so `fix && git add && git commit` on one line is checked against the *unfixed* tree and blocked entirely; edit first, commit in a separate call. Commits also run H2 on the working tree, not the staged snapshot | The docs check caught the unanchored rules before they mattered; the compound-command behavior is how PreToolUse works, so it's documented rather than worked around |
 ---
 
 ## 9. Open questions

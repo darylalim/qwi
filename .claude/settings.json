@@ -1,0 +1,78 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(uv pip install *)",
+      "Edit(/uv.lock)",
+      "Edit(/var/**)",
+      "Edit(/eval/results/**/*.png)"
+    ],
+    "ask": [
+      "Bash(hf download *)",
+      "Bash(huggingface-cli download *)",
+      "Bash(qwi models fetch *)",
+      "Bash(uv run qwi models fetch *)",
+      "Bash(hf cache delete *)",
+      "Bash(hf cache rm *)",
+      "Bash(mflux-generate*)",
+      "Bash(mflux-save *)",
+      "Bash(sudo *)",
+      "Bash(git push *)",
+      "Bash(git tag *)",
+      "Bash(gh release *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/py_format.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_commit.py\"",
+            "timeout": 180,
+            "onFailure": "block",
+            "statusMessage": "Running all gates before commit…"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_gates.py\"",
+            "timeout": 180,
+            "statusMessage": "Running all gates…"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_context.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
