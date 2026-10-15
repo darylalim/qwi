@@ -27,7 +27,9 @@ from qwi.config import DEFAULTS
 from qwi.errors import EvalExists, EvalSetError, GenerationCancelled
 from qwi.events import CandidateReady, Event, RunStarted, StageFinished, StageStarted
 from qwi.lock import RunLock
-from qwi.pipeline import ENCODER, ROLES, StageFactory, default_generate_stage, ignore_event
+from qwi.pipeline import ENCODER, StageFactory, default_generate_stage, ignore_event
+
+ROLES = ["image"]  # models this runner loads; guard + rewrite join it in M2 (§5.4 stage order)
 
 ISOLATED_WHITE = 235  # all channels ≥ this counts as near-white (§5.4 automated checks)
 ISOLATED_BORDER = 0.10  # outer 10% of each side

@@ -18,9 +18,18 @@ from qwi.errors import (
     ModelUnavailable,
     PipelineBusy,
 )
-from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
+from qwi.events import (
+    CandidateReady,
+    DenoiseStep,
+    Event,
+    GuardVerdict,
+    RunStarted,
+    StageFinished,
+    StageStarted,
+)
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
+from qwi.stages import guard
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate
 
@@ -70,6 +79,28 @@ class FakeStage:
         self.unloaded = True
 
 
+class FakeGuard:
+    """Returns a fixed guard reply, parsed like the real stage does."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        self.seen: list[str] = []
+        self.loaded = self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def __call__(self, text: str) -> guard.Verdict:
+        self.seen.append(text)
+        return guard.parse(self.raw)
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+
+SAFE = "Safety: Safe\nCategories: None"
+
+
 class Harness:
     def __init__(self) -> None:
         self.stages: list[FakeStage] = []
@@ -78,9 +109,18 @@ class Harness:
         self.on_event: Callable[[Event], None] = lambda event: None
         self.resolved: list[str] = []
         self.startup: Callable[[list[str]], None] = lambda roles: None
+        self.guard_reply = SAFE
+        self.guards: list[FakeGuard] = []
         self.pipeline = Pipeline(
-            self._make, resolve=self._resolve, startup=lambda r: self.startup(r)
+            self._make,
+            resolve=self._resolve,
+            startup=lambda r: self.startup(r),
+            make_guard=self._make_guard,
         )
+
+    def _make_guard(self, model_path: Path) -> FakeGuard:
+        self.guards.append(FakeGuard(self.guard_reply))
+        return self.guards[-1]
 
     def _resolve(self, role: str) -> Path:
         self.resolved.append(role)
@@ -145,10 +185,13 @@ def test_a_run_writes_candidates_and_a_final_record(h: Harness) -> None:
     }
     assert rec.preflight["generate"]["decision"] == "ok"
     assert rec.peak_mem_gb["generate"] == pytest.approx(14.0)
-    assert rec.swap_gb == {"generate": 0.0}
-    assert "generate" in rec.timings_s
-    assert set(rec.model_revisions) == {"image"}
-    assert h.resolved == ["image"]
+    assert rec.swap_gb == {"guard": 0.0, "generate": 0.0}
+    assert set(rec.timings_s) == {"guard", "encode", "generate"}
+    assert set(rec.model_revisions) == {"guard", "image"}
+    assert h.resolved == ["guard", "image"]
+    assert rec.guard["decision"] == "allow"
+    assert h.guards[0].seen == ["a red apple"]
+    assert (h.guards[0].loaded, h.guards[0].unloaded) == (True, True)
     assert h.stages[0].loaded
     assert h.stages[0].unloaded
 
@@ -157,6 +200,9 @@ def test_events_arrive_in_order(h: Harness) -> None:
     h.run(n=2)
     assert h.kinds() == [
         "RunStarted",
+        "StageStarted",
+        "StageFinished",
+        "GuardVerdict",
         "StageStarted",
         "StageFinished",
         "StageStarted",
@@ -175,8 +221,9 @@ def test_events_arrive_in_order(h: Harness) -> None:
     ]
     assert isinstance(h.events[0], RunStarted)
     assert h.events[0].seeds == [100, 101]
-    assert [e.stage for e in h.events if isinstance(e, StageStarted)] == ["encode", "generate"]
-    assert [e.stage for e in h.events if isinstance(e, StageFinished)] == ["encode", "generate"]
+    stages = ["guard", "encode", "generate"]
+    assert [e.stage for e in h.events if isinstance(e, StageStarted)] == stages
+    assert [e.stage for e in h.events if isinstance(e, StageFinished)] == stages
     ready = [e for e in h.events if isinstance(e, CandidateReady)]
     assert [(e.index, e.seed, e.path.name) for e in ready][1] == (1, 101, "cand_1_seed101.png")
     assert isinstance(h.events[-1], StageFinished)
@@ -286,7 +333,8 @@ def test_allow_swap_runs_and_records_the_decision(
 
 
 def test_swap_during_the_stage_is_recorded(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    readings = iter([vm(30 * 10**9, swapouts=0), vm(30 * 10**9, swapouts=0)])
+    # guard: pre-flight, watchdog start, delta; generate: pre-flight, watchdog start, then swap.
+    readings = iter([vm(30 * 10**9, swapouts=0)] * 5)
     swapped = vm(30 * 10**9, swapouts=6104)  # pages: 6104 x 16 KiB = 0.1 GB
     monkeypatch.setattr(memory, "vm_stat", lambda: next(readings, swapped))
     rec = h.run()
@@ -305,7 +353,7 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
         held.append(lock.is_held()) if isinstance(event, StageStarted) else None
     )
     h.run()
-    assert held == [True, True]  # encode and generate
+    assert held == [True, True, True]  # guard, encode and generate
     assert not lock.is_held()
 
 
@@ -439,3 +487,73 @@ def test_every_failure_path(
         assert "Traceback" in line["traceback"]
     else:
         assert error_lines == []
+
+
+# --- Guard (§5.2): the input pass before any other model loads -----------------------------
+
+
+def test_a_guard_block_ends_the_run_with_exit_2_before_generate(h: Harness) -> None:
+    h.guard_reply = "Safety: Unsafe\nCategories: Violent"
+    rec = h.run()
+    run = run_dir(rec)
+    assert (rec.status, rec.error, rec.candidates) == ("blocked", None, [])
+    assert errors.exit_code_for(rec.status) == 2
+    assert rec.guard == {
+        "mode": "default",
+        "input": {"level": "Unsafe", "categories": ["Violent"], "raw": h.guard_reply},
+        "rewrite": None,
+        "decision": "block",
+        "reason": "input:Unsafe:Violent",
+    }
+    assert h.stages == []  # the image model never loaded
+    assert h.resolved == ["guard"]
+    assert h.guards[0].unloaded
+    assert not lock.is_held()
+    (verdict,) = [e for e in h.events if isinstance(e, GuardVerdict)]
+    assert (verdict.check, verdict.decision) == ("input", "block")
+    assert verdict.summary == "input prompt is Unsafe (Violent) (--guard-mode default)"
+    (line,) = logs.read(run / "run.log", "warning")
+    assert line["event"] == "blocked"
+    assert line["msg"] == f"Blocked by guard: {verdict.summary}"
+
+
+def test_a_guard_warning_is_logged_and_the_run_continues(h: Harness) -> None:
+    h.guard_reply = "Safety: Controversial\nCategories: Violent"
+    rec = h.run()
+    assert rec.status == "ok"
+    assert (rec.guard["decision"], rec.guard["reason"]) == ("warn", "input:Controversial:Violent")
+    assert len(rec.candidates) == 3
+    (line,) = logs.read(run_dir(rec) / "run.log", "warning")
+    assert (line["event"], line["msg"], line["reason"]) == (
+        "guard_verdict",
+        "warn",
+        "input:Controversial:Violent",
+    )
+
+
+def test_guard_mode_selects_the_policy_column(h: Harness) -> None:
+    h.guard_reply = "Safety: Controversial\nCategories: Violent"
+    rec = h.run(guard_mode="strict")
+    assert (rec.status, rec.guard["mode"], rec.guard["decision"]) == ("blocked", "strict", "block")
+
+
+def test_unparseable_guard_output_fails_closed(h: Harness) -> None:
+    h.guard_reply = "I'm sorry, I can't help with that."
+    rec = h.run(guard_mode="loose")
+    assert rec.status == "blocked"
+    assert rec.guard["input"]["level"] is None
+    assert rec.guard["reason"] == "input:guard_parse_error"
+
+
+def test_a_guard_failure_is_an_error_in_the_guard_stage(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: FakeGuard, text: str) -> guard.Verdict:
+        raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+
+    monkeypatch.setattr(FakeGuard, "__call__", broken)
+    rec = h.run()
+    assert rec.error is not None
+    assert (rec.error["type"], rec.error["stage"]) == ("DeviceOutOfMemory", "guard")
+    assert h.guards[0].unloaded
+    assert h.stages == []

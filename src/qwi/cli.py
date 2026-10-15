@@ -17,8 +17,17 @@ from qwi import errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
 from qwi.evaluation import EvalRequest, EvalRunner
-from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
+from qwi.events import (
+    CandidateReady,
+    DenoiseStep,
+    Event,
+    GuardVerdict,
+    RunStarted,
+    StageFinished,
+    StageStarted,
+)
 from qwi.pipeline import GenerateRequest, Pipeline
+from qwi.stages.guard import GuardMode
 
 app = typer.Typer(no_args_is_help=True, help="Local text-to-image pipeline for Apple Silicon.")
 models_app = typer.Typer(no_args_is_help=True, help="Model weights (the only download path).")
@@ -29,6 +38,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(runs_app, name="runs")
 
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
+GUARD_MODE = GuardMode(DEFAULTS.guard_mode)
 
 
 def _version(value: bool) -> None:
@@ -91,6 +101,10 @@ def _render(event: Event) -> None:
             typer.echo(f"run {run_dir.name} (seeds {seeds[0]}…{seeds[-1]})")
         case StageStarted(stage):
             typer.echo(f"{stage}: loading")
+        case GuardVerdict(decision="warn", summary=summary):
+            typer.echo(f"guard warning: {summary}", err=True)
+        case GuardVerdict(decision="block", summary=summary):
+            typer.echo(f"Blocked by guard: {summary}", err=True)
         case DenoiseStep(candidate, step, total):
             typer.echo(f"\r  candidate {candidate + 1}: step {step}/{total}", nl=False)
         case CandidateReady(index, seed, path):
@@ -107,6 +121,10 @@ def generate(
     width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
     height: Annotated[int, typer.Option(min=16)] = DEFAULTS.height,
     seed: Annotated[int | None, typer.Option(help="Base seed (default: random).")] = None,
+    guard_mode: Annotated[
+        GuardMode,
+        typer.Option(help="How Controversial prompts are handled. Unsafe always blocks."),
+    ] = GUARD_MODE,
     allow_swap: Annotated[
         bool, typer.Option("--allow-swap", help="Run even if pre-flight expects swap.")
     ] = False,
@@ -121,6 +139,7 @@ def generate(
         width=width,
         height=height,
         seed=seed,
+        guard_mode=guard_mode.value,
         allow_swap=allow_swap,
         verbose=verbose,
     )

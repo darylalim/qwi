@@ -7,7 +7,14 @@ from typer.testing import CliRunner
 
 from qwi import cli, logs, paths, record, storage
 from qwi.errors import InsufficientDisk
-from qwi.events import CandidateReady, DenoiseStep, RunStarted, StageFinished, StageStarted
+from qwi.events import (
+    CandidateReady,
+    DenoiseStep,
+    GuardVerdict,
+    RunStarted,
+    StageFinished,
+    StageStarted,
+)
 from qwi.record import RunRecord
 
 runner = CliRunner()
@@ -94,6 +101,51 @@ def test_generate_exit_code_follows_the_record(monkeypatch: pytest.MonkeyPatch) 
     result = runner.invoke(cli.app, ["generate", "p"])
     assert result.exit_code == 4
     assert "error: Not enough free memory for generate" in result.output
+
+
+def test_guard_mode_reaches_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    assert runner.invoke(cli.app, ["generate", "p"]).exit_code == 0
+    assert runner.invoke(cli.app, ["generate", "p", "--guard-mode", "strict"]).exit_code == 0
+    assert [r.guard_mode for r in fake.requests] == ["default", "strict"]
+
+
+def test_an_unknown_guard_mode_is_a_usage_error() -> None:
+    assert runner.invoke(cli.app, ["generate", "p", "--guard-mode", "off"]).exit_code == 2
+
+
+class GuardedPipeline:
+    """Emits one guard verdict; a block ends the run like the real pipeline."""
+
+    def __init__(self, decision: str) -> None:
+        self.decision = decision
+
+    def __call__(self) -> "GuardedPipeline":
+        return self
+
+    def run(self, request, on_event) -> RunRecord:
+        summary = "input prompt is Controversial (Violent) (--guard-mode default)"
+        on_event(GuardVerdict("input", "Controversial", ("Violent",), self.decision, summary))
+        status = "blocked" if self.decision == "block" else "ok"
+        return RunRecord(request.prompt, status=status)
+
+
+def test_a_guard_warning_goes_to_stderr_and_the_run_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "Pipeline", GuardedPipeline("warn"))
+    result = runner.invoke(cli.app, ["generate", "p"])
+    assert result.exit_code == 0
+    assert "guard warning: input prompt is Controversial (Violent)" in result.stderr
+    assert "guard warning" not in result.stdout
+
+
+def test_a_guard_block_prints_why_and_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Pipeline", GuardedPipeline("block"))
+    result = runner.invoke(cli.app, ["generate", "p"])
+    assert result.exit_code == 2
+    assert "Blocked by guard: input prompt is Controversial (Violent)" in result.stderr
 
 
 def test_generate_reports_busy_with_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:

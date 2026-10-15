@@ -4,7 +4,8 @@ One run at a time (`RunLock`). Each stage: pre-flight check → load → run →
 `run()` always returns the `RunRecord`; its `status` and `error` say how it ended, and the
 traceback of any error is in `run.log`. Only `PipelineBusy` is raised, because no run exists then.
 
-M1 runs the generate stage; M2 adds guard + rewrite before it, M3 adds rerank after it.
+Stages: guard (input pass, §5.2) → encode → generate. The rewrite stage (M2) goes between guard
+and encode and adds the guard's second pass; M3 adds rerank after generate.
 """
 
 import logging
@@ -18,16 +19,25 @@ from typing import Any, Protocol
 
 from qwi import errors, logs, memory, models, paths, preflight, record, storage
 from qwi.config import DEFAULTS
-from qwi.errors import GenerationCancelled
-from qwi.events import CandidateReady, DenoiseStep, Event, RunStarted, StageFinished, StageStarted
+from qwi.errors import GenerationCancelled, GuardBlocked
+from qwi.events import (
+    CandidateReady,
+    DenoiseStep,
+    Event,
+    GuardVerdict,
+    RunStarted,
+    StageFinished,
+    StageStarted,
+)
 from qwi.lock import RunLock
 from qwi.record import RunRecord
+from qwi.stages import guard
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate, Generate
 
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
-ROLES = ["image"]  # models this run loads; M2 adds guard + rewrite, M3 rerank
+ROLES = ["guard", "image"]  # models this run loads; rewrite and rerank join in M2/M3
 
 
 @dataclass
@@ -38,9 +48,18 @@ class GenerateRequest:
     height: int = DEFAULTS.height
     steps: int = DEFAULTS.steps
     seed: int | None = None  # base seed; random when None, recorded either way
+    guard_mode: str = DEFAULTS.guard_mode
     allow_swap: bool = False
     verbose: bool = False
     cancel: threading.Event = field(default_factory=threading.Event)
+
+
+class GuardStage(Protocol):
+    def load(self) -> None: ...
+
+    def __call__(self, text: str) -> guard.Verdict: ...
+
+    def unload(self) -> None: ...
 
 
 class GenerateStage(Protocol):
@@ -56,12 +75,17 @@ class GenerateStage(Protocol):
 
 
 StageFactory = Callable[[Path, Sequence[object], memory.SwapWatchdog], GenerateStage]
+GuardFactory = Callable[[Path], GuardStage]
 
 
 def default_generate_stage(
     model_path: Path, callbacks: Sequence[object], watchdog: memory.SwapWatchdog
 ) -> GenerateStage:
     return Generate(model_path, callbacks=callbacks, watchdog=watchdog)
+
+
+def default_guard_stage(model_path: Path) -> GuardStage:
+    return guard.Guard(model_path)
 
 
 def ignore_event(_: Event) -> None:
@@ -90,8 +114,10 @@ class Pipeline:
         make_generate: StageFactory = default_generate_stage,
         resolve: Callable[[str], Path] = models.resolve,
         startup: Callable[[list[str]], None] = storage.startup,
+        make_guard: GuardFactory = default_guard_stage,
     ) -> None:
         self._make_generate = make_generate
+        self._make_guard = make_guard
         self._resolve = resolve
         self._startup = startup
         self._stage: str | None = None
@@ -128,6 +154,7 @@ class Pipeline:
             try:
                 self._stage = "startup"
                 self._startup(ROLES)  # disk rule, $QWI_HOME writable, models cached (§5.11)
+                self._guard(request, rec, run, on_event)
                 self._generate(request, rec, run, on_event)
             except (Exception, KeyboardInterrupt) as exc:
                 failure = errors.classify(exc, self._stage or "setup")
@@ -144,6 +171,56 @@ class Pipeline:
                 record.write(rec, run)
             logs.event(logging.INFO, None, "run_finished", rec.status, status=rec.status)
         return rec
+
+    def _guard(
+        self,
+        request: GenerateRequest,
+        rec: RunRecord,
+        run: Path,
+        on_event: Callable[[Event], None],
+    ) -> None:
+        """Stage 1, input pass (§5.2): a block ends the run before any other model loads."""
+        stage = self._stage = "guard"
+        policy = guard.load_policy()  # a broken table fails before anything loads
+        rec.preflight[stage] = preflight.check(
+            stage, preflight.STATIC_GB[stage], allow_swap=request.allow_swap
+        ).as_record()
+        record.write(rec, run)
+        if request.cancel.is_set():
+            raise GenerationCancelled()
+
+        watchdog = memory.SwapWatchdog(stage)
+        watchdog.start()
+        model = self._make_guard(self._resolve("guard"))
+        on_event(StageStarted(stage))
+        logs.event(logging.INFO, stage, "stage_started", "loading", mode=request.guard_mode)
+        started = time.perf_counter()
+        try:
+            with memory.track_peak() as peak:
+                model.load()
+                verdict = model(request.prompt)
+        finally:
+            model.unload()  # the rewrite stage will keep it loaded for the second pass (§4)
+            rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
+        self._finish_stage(rec, stage, started, peak.gb, on_event)
+
+        result = guard.decide(request.guard_mode, verdict, policy=policy)
+        rec.guard = result.as_record()
+        record.write(rec, run)
+        summary = result.summary()
+        on_event(GuardVerdict("input", verdict.level, verdict.categories, result.decision, summary))
+        logs.event(
+            logging.WARNING if result.decision == "warn" else logging.INFO,
+            stage,
+            "guard_verdict",
+            result.decision,
+            check="input",
+            level=verdict.level,
+            categories=list(verdict.categories),
+            reason=result.reason,
+        )
+        if result.decision == "block":
+            raise GuardBlocked(summary)
 
     def _generate(
         self,
