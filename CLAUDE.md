@@ -59,3 +59,6 @@ uv run qwi ui                              # Streamlit UI
 - session context at start.
 
 If a hook blocks you, fix the cause; never bypass it (no `--no-verify`).
+
+- `main` is protected by the "main: required CI" ruleset (lint, hygiene, test; no bypass, even for the owner). Always work on a branch and open a PR; a direct push to `main` is rejected.
+- Run `git commit` in its own Bash call, separate from edits. H2 checks the whole command line before any of it runs, so `fix && git add && git commit` is checked against the unfixed tree and blocked.
