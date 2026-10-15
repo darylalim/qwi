@@ -1,0 +1,59 @@
+# Release v<version> when a CI-verified push to main changes [project].version (PLAN.md §5.9).
+# The only workflow with write permission; pull-request CI runs never reach it.
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }} # the CI-verified commit, never HEAD
+          fetch-depth: 0 # tags, for the release gate
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.22"
+      - name: Read version
+        id: version
+        run: echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
+      - name: Release gate
+        id: gate
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: uv run --no-project --with packaging .github/scripts/release_gate.py "$VERSION"
+      - name: Build
+        if: steps.gate.outputs.release == 'true'
+        run: |
+          uv build
+          python3 -I .github/scripts/check_wheel.py dist/*.whl
+      - name: Publish
+        if: steps.gate.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.gate.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "v$VERSION" --target "$HEAD_SHA" --title "qwi $VERSION" \
+            --generate-notes "${flags[@]}" dist/*

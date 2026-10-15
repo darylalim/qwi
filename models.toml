@@ -1,0 +1,26 @@
+# Model roles, pinned to exact snapshots (PLAN.md §5.7) with their licenses (§5.10).
+# Loaders pass `revision=`. Any change here needs an eval re-run (§5.4 "Re-run triggers").
+# The `image` role (Qwen-Image-2.1) is added in M0b, once the weight source is chosen.
+
+[licenses."apache-2.0"]
+name = "Apache License 2.0"
+url = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[licenses."qwen-research"]
+name = "Qwen Research License (research and non-commercial use)"
+url = "https://huggingface.co/Qwen/Qwen-Image-2.1"
+
+[roles.guard]
+repo = "mlx-community/Qwen3Guard-Gen-0.6B-MLX"
+revision = "919a45777b667714648ee3d10d4560538b5b8bc8"
+license = "apache-2.0"
+
+[roles.rewrite]
+repo = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
+revision = "defcdea7cc7a4b0858fea563cbbce171d328e457"
+license = "apache-2.0"
+
+[roles.rerank]
+repo = "mlx-community/Qwen3-VL-Reranker-2B-8bit"
+revision = "e9cd8bbefa68882550b30cfe1c9905b882965888"
+license = "apache-2.0"

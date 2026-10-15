@@ -542,7 +542,7 @@ Installed locally as of 2026-10-14: **uv 0.12.22, ruff 0.17.0, ty 0.0.87**. uv-m
 
 **uv (project and environment):**
 - `uv init --package --python 3.12` creates the `src/qwi/` layout and a `[project.scripts]` entry point.
-- Runtime dependencies go in `[project.dependencies]`. **Pin mflux exactly: `mflux==0.22.0`** (latest release, 2026-10-08), because its Qwen-Image-2.1 internals are only weeks old. It declares `torch` as a dependency, so torch gets installed but must never be imported (§2, `test_no_torch.py`). Keep the others at `>=` with a lower bound.
+- Runtime dependencies go in `[project.dependencies]`. **Pin mflux exactly: `mflux==0.22.0`** (latest release, 2026-10-08), because its Qwen-Image-2.1 internals are only weeks old. It declares `torch` as a dependency; `[tool.uv] override-dependencies = ["torch; sys_platform == 'never'"]` keeps torch uninstalled, because once installed transformers imports it at runtime (§8, M0a torch check; `tests/test_dependencies.py`). Keep the others at `>=` with a lower bound.
 - Dev tools go in the `dev` dependency group: `uv add --dev ruff ty pytest`. Commit `uv.lock`.
 - Always run through the project environment (`uv run ...`), never global tools, so everyone uses the same pinned versions.
 
@@ -567,6 +567,7 @@ dev = ["ruff", "ty", "pytest"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["*.md"]  # ruff 0.17 formats code blocks in Markdown; PLAN.md samples are specs
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "PTH"]
@@ -1052,7 +1053,7 @@ Everything here lives in **`.claude/settings.json` (committed)**. Personal tweak
   "permissions": {
     "deny": [
       "Bash(pip install *)", "Bash(pip3 install *)", "Bash(uv pip install *)",
-      "Edit(uv.lock)", "Edit(var/**)", "Edit(eval/results/**/*.png)"
+      "Edit(/uv.lock)", "Edit(/var/**)", "Edit(/eval/results/**/*.png)"
     ],
     "ask": [
       "Bash(hf download *)", "Bash(huggingface-cli download *)",
@@ -1066,7 +1067,7 @@ Everything here lives in **`.claude/settings.json` (committed)**. Personal tweak
 }
 ```
 
-- **deny:** dependencies change only through `uv add` / `uv remove`; `uv.lock` is only written by uv; `var/` (`$QWI_HOME`) is runtime data.
+- **deny:** paths are root-anchored with a leading `/` (an unanchored `Edit(uv.lock)` matches at any depth). Dependencies change only through `uv add` / `uv remove`; `uv.lock` is only written by uv; `var/` (`$QWI_HOME`) is runtime data.
 - **ask:** anything that downloads or deletes GBs of weights, runs a real model (minutes of GPU and about 20 GB of RAM), or uses `sudo` (e.g. `iogpu.wired_limit_mb`, §4). The human decides each time.
 
 #### Hooks (`.claude/hooks/*.py`, Python standard library only, run with `python3 -I`)
@@ -1148,11 +1149,11 @@ permissions: { contents: read }              # least privilege; no write tokens
 concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
 env:
   HF_HUB_OFFLINE: "1"                        # a test can never trigger a model download
-  QWI_HOME: ${{ runner.temp }}/qwi           # §5.7: never write into the checkout
   QWI_PIPELINE: fake                         # §5.6: UI/AppTest use FakePipeline
   QWI_JOBS_SYNC: "1"
 ```
 - `timeout-minutes: 10` per job.
+- **`QWI_HOME`** (§5.7: never write into the checkout) is set in the test job's first step, `echo "QWI_HOME=$RUNNER_TEMP/qwi" >> "$GITHUB_ENV"`, because the `runner` context isn't allowed in workflow- or job-level `env` (actionlint).
 - **Pin every action to a full commit SHA** (with a `# vX.Y.Z` comment), chosen from the latest release **at implementation time**. The plan deliberately doesn't name versions.
 
 #### Known CI constraints
@@ -1421,16 +1422,16 @@ M5a (needs M1 events/cancel/lock/errors, M2 rewrite stage, M3 rerank) ─► M5b
 
 Everything here is static: project files, tooling, guardrails, and dependency resolution. It can be done (and reviewed) without touching the 48 GB disk budget or loading a model.
 
-- [ ] Scaffold per §5.5: `uv init --package --python 3.12`, `uv python pin 3.12`, `uv add mflux mlx-lm mlx-vlm pillow typer` (then pin mflux exactly), `uv add --dev ruff ty pytest`. Paste in the §5.5 tooling config, set `description`/`keywords` from §5.9 "Repo metadata" (with `tests/test_metadata.py`), and confirm the "All gates" command passes on the empty package.
-- [ ] **Claude Code guardrails (§5.8):** add `.claude/settings.json` (permission rules + hooks H1–H4) and `.claude/hooks/*.py` with their `tests/hooks/` fast tests. Pipe-test each script and prove H1 and H2 fire. Do this right after the scaffold, so every later step (and M0b) runs under the hooks.
-- [ ] **`.gitignore` (§5.7):** add the exact file from §5.7 and `tests/test_gitignore.py`; confirm `git status` is clean after `uv sync` and one CLI smoke run.
-- [ ] **License (§5.10):** add `LICENSE` (Apache-2.0), `NOTICE`, and the README "Model licenses" section; add the `license` / `license-files` fields to `pyproject.toml` and a `license` field per role to `models.toml`; add the §5.10 fast tests.
-- [ ] **CI (§5.9):** add `ci.yml`, `release.yml` + `release_gate.py` (with fast tests), `dependabot.yml`, and the PR template; give `pre_commit.py` a `--range` mode with its fast test; run `actionlint`.
-- [ ] **Dependency check: torch.** mflux 0.22.0 *declares* torch (§2), so it will be installed; this check confirms nothing else adds torchvision and that it's never imported. After `uv add mflux mlx-lm mlx-vlm`, run `uv tree | grep -iE 'torch|torchvision'` and `uv tree --invert --package torch` (if present) to see what pulls them in. Record the result in §8.
+- [x] Scaffold per §5.5: `uv init --package --python 3.12`, `uv python pin 3.12`, `uv add mflux mlx-lm mlx-vlm pillow typer` (then pin mflux exactly), `uv add --dev ruff ty pytest`. Paste in the §5.5 tooling config, set `description`/`keywords` from §5.9 "Repo metadata" (with `tests/test_metadata.py`), and confirm the "All gates" command passes on the empty package.
+- [x] **Claude Code guardrails (§5.8):** add `.claude/settings.json` (permission rules + hooks H1–H4) and `.claude/hooks/*.py` with their `tests/hooks/` fast tests. Pipe-test each script and prove H1 and H2 fire. Do this right after the scaffold, so every later step (and M0b) runs under the hooks.
+- [x] **`.gitignore` (§5.7):** add the exact file from §5.7 and `tests/test_gitignore.py`; confirm `git status` is clean after `uv sync` and one CLI smoke run.
+- [x] **License (§5.10):** add `LICENSE` (Apache-2.0), `NOTICE`, and the README "Model licenses" section; add the `license` / `license-files` fields to `pyproject.toml` and a `license` field per role to `models.toml`; add the §5.10 fast tests.
+- [x] **CI (§5.9):** add `ci.yml`, `release.yml` + `release_gate.py` (with fast tests), `dependabot.yml`, and the PR template; give `pre_commit.py` a `--range` mode with its fast test; run `actionlint`.
+- [x] **Dependency check: torch.** mflux 0.22.0 *declares* torch (§2), so it will be installed; this check confirms nothing else adds torchvision and that it's never imported. After `uv add mflux mlx-lm mlx-vlm`, run `uv tree | grep -iE 'torch|torchvision'` and `uv tree --invert --package torch` (if present) to see what pulls them in. Record the result in §8.
   - Torch not present: ✅ done.
   - Present but only declared: acceptable **if it's never imported at runtime** (enforced by `test_no_torch.py` in M0b). Note the extra disk cost.
   - Imported at runtime by mflux: record which module does it. Confirm that no tensors go to MPS (no `torch.mps` allocations), and consider patching it out, or report it upstream.
-- [ ] Confirm `mflux-generate-qwen-2.1` exists in the installed release (`--help` only, no model load). Check whether mflux, mlx-vlm and MLX all support Python 3.13 (see §5.5).
+- [x] Confirm `mflux-generate-qwen-2.1` exists in the installed release (`--help` only, no model load). Check whether mflux, mlx-vlm and MLX all support Python 3.13 (see §5.5).
 - **Exit:** "All gates" passes on the scaffolded package; H1 and H2 are proven to fire; `actionlint` is clean on `ci.yml` and `release.yml`; the torch dependency check is logged in §8; `git status` is clean. **No weights downloaded.**
 - **Deferred until the repo has a GitHub remote** (doesn't block the exit): first push; apply the repo description and topics with `gh repo edit` (§5.9 "Repo metadata") and check them with `gh repo view --json description,repositoryTopics`; add the `v*` tag ruleset and `main` branch protection (§5.9); then confirm all three CI jobs pass and that MLX imports on `macos-15` without Metal (add the `requires_metal` skip if it doesn't, §5.9).
 
@@ -1445,10 +1446,10 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 - [ ] **Re-verify the §2 "mflux internals" findings on the pinned `mflux==0.22.0`**: encoder recipe, `prompt_cache` injection, lazy weights, the `call_in_loop` hook, and that an exception raised in the hook propagates. Write a 20-line spike: prime `prompt_cache`, set `text_encoder=None`, generate at 256²/2 steps, and raise from the hook at step 1.
 - [ ] Check whether the bf16 encoder is released after encoding or stays resident during denoising. This decides whether option A fits.
 - [ ] **mlx-vlm / mlx-lm smoke test (cached models, no download):** one short text generation with Qwen3-VL-8B (rewrite path), one forward pass of **Qwen3-VL-Reranker-2B** producing finite `yes`/`no` logits (§5.3, tied embeddings, no scoring head), and one short generation with Qwen3Guard (mlx-lm). Record the versions and any incompatibilities in §8; if mlx-vlm can't run one of them, it's a plan change before M1, not a surprise in M2/M3.
-- [ ] **Dependency check: Qwen3-VL processor.** Without importing torch (it's installed because mflux declares it; assert `"torch" not in sys.modules` afterward), load the processors for `Qwen3-VL-8B-Instruct-4bit` and `Qwen3-VL-Reranker-2B-8bit` through **mlx-vlm's own load path** (`mlx_vlm.load`). Then run one text plus 768² image through each. If it fails, or imports torch/torchvision:
+- [ ] **Dependency check: Qwen3-VL processor.** Without torch (not installed since M0a, §8; still assert `"torch" not in sys.modules` afterward), load the processors for `Qwen3-VL-8B-Instruct-4bit` and `Qwen3-VL-Reranker-2B-8bit` through **mlx-vlm's own load path** (`mlx_vlm.load`). Then run one text plus 768² image through each. If it fails, or imports torch/torchvision:
   1. Try `use_fast=False`, the slow processor, which only uses PIL and NumPy.
   2. Otherwise, check whether mlx-vlm ships its own Qwen3-VL image processing.
-  3. As a last resort, add `torchvision` as a preprocessing-only dependency and record that in §8.
+  3. As a last resort, add `torchvision` as a preprocessing-only dependency and record that in §8. **This now also means lifting the M0a torch override**, so it reopens the torch decision (§8).
 - [ ] **Runtime check:** add `tests/test_no_torch.py` (marked `slow`). In M0b it imports `mflux`, `mlx_lm` and `mlx_vlm`, loads both Qwen3-VL processors, runs a minimal `QwenImage21` generation (256², 2 steps), then asserts `"torch" not in sys.modules`. **M1, M2 and M3 each extend it** to run their new stage, so the runtime stays torch-free as the pipeline grows.
 - **Exit:** one image generated from the chosen weight source; source, size, and revision recorded in §8 and `models.toml`; `HF_HUB_OFFLINE=1` set for the runtime; baseline wall time and peak memory recorded in §8 (this decides the Turbo trigger, §8); the §2 internals re-verified on 0.22.0; the processor check resolved and logged; the determinism result recorded (§5.4 noise floor); `test_no_torch.py` passes under `-m slow`.
 
@@ -1563,6 +1564,13 @@ Starts only after M0a, so it runs under the hooks and permission rules: download
 | 2026-10-14 | Milestones: **M5 split into M5a (jobs + Generate + errors + rewrite-edit), M5b (History, Eval review, storage commands), M5c (theme, responsive, final checks)**; a **minimal blind Eval review app moved into M2** and `qwi doctor` / `models fetch` into M1, because earlier milestones depend on them; explicit dependency map and versions 0.1–0.7 | Each milestone fits one session; the dependency map exposed that the M2–M4 eval decisions needed a review UI that was scheduled for M5 |
 | 2026-10-14 | `PLAN.md` gets a table of contents | ~1,600 lines; implementation sessions should jump straight to the relevant spec |
 | 2026-10-14 | Gap review fixes: **no transparent output** (mflux txt2img decodes RGB only; RGBA needs the edit variant, now out of scope): `rgba` eval prompt → `isolated` (plain white), rewriter rule 6 updated; **bf16 reference encoder** for M4 via `text_encoder/`-only download when needed; **stage-batched eval runner** under the run lock; **M0b mlx-vlm/mlx-lm smoke test**; **lazy model-library imports** + `test_imports.py`; **`config.py` single source of defaults** + CLI reference; **eval images in `$QWI_HOME/eval`**; README outline in M5c; option C wording clarified; **ports 8501/8502**; restored the automated eval checks dropped in the protocol rewrite | Verified against mflux source (`models/qwen21/README.md`); each fix removes a wrong assumption, a hidden cost (model reloads, import time, untracked disk), or a scattered definition before implementation starts |
+| 2026-10-14 | M0a scaffold: package version starts at **`0.0.0`** (`uv init` writes `0.1.0`; reset with `uv version 0.0.0`). Resolved: mflux 0.22.0, mlx-lm 0.32.0, mlx-vlm 0.7.8, pillow 12.3.0, typer 0.27.3, streamlit 1.66.0 (`ui` extra), ruff 0.17.0, ty 0.0.87, pytest 9.1.1, CPython 3.12.15. `license`/`license-files` wait for the §5.10 task (uv_build fails on missing `LICENSE`) | §6 reserves `0.1.0` for the M1 release, and the §5.9 release gate fails on downgrades, so the first release must be a real bump |
+| 2026-10-14 | ruff: `extend-exclude = ["*.md"]` (§5.5) | Observed: ruff 0.17 formats Python code blocks in Markdown, so a bare `ruff format` rewrote the `PLAN.md` samples and `format --check` would fail on the untouched plan. The samples are specs (comment alignment, abbreviated dicts), not code |
+| 2026-10-14 | Guardrails (§5.8) as built, checked against the Claude Code hooks/permissions docs on v2.1.300: **root-anchored path rules** (`Edit(/uv.lock)`, `Edit(/var/**)`, `Edit(/eval/results/**/*.png)`; unanchored ones match at any depth; Edit rules also cover Write and shell redirects); `if` is best-effort, so `pre_commit.py` re-checks the command itself; `onFailure` needs v2.1.295+; hooks share `.claude/hooks/_common.py` (put on `sys.path` explicitly, since `-I` leaves the script dir off) and stay **Python 3.9-compatible** (`/usr/bin/python3` may come first on PATH; a fast test parses them as 3.9). Verified in-session: H1 reformatted a probe edit and returned lint errors via exit 2; H2 blocked a commit on lint and again on a failing test. **Observed:** H2 runs before the whole Bash command, so `fix && git add && git commit` on one line is checked against the *unfixed* tree and blocked entirely; edit first, commit in a separate call. Commits also run H2 on the working tree, not the staged snapshot | The docs check caught the unanchored rules before they mattered; the compound-command behavior is how PreToolUse works, so it's documented rather than worked around |
+| 2026-10-14 | License files as built (§5.10): `LICENSE` copied from an installed package whose file matches the canonical `apache.org` text (SHA-256 `cfc7749b…`, the hash the test pins); `models.toml` has a `[licenses]` table (`apache-2.0`, `qwen-research`) and `[roles.*]` entries with **full 40-hex revisions read from the local HF cache** (they match the §5.7 prefixes); **no `image` role yet**, since M0b picks the weight source and pins it; the README table renderer lives in `tests/test_licenses.py` until M1's `models.toml` loader exists | Pinning a guessed repo or a truncated revision would be worse than an explicit gap; NOTICE and the README carry the Qwen Research caveat from day one |
+| 2026-10-14 | CI as built (§5.9): actions pinned to `actions/checkout` v7.0.1 (`3d3c42e5…`) and `astral-sh/setup-uv` v10.3.0 (`1c37ad07…`), uv pinned to 0.12.22 to match local; lint uses `uv run --no-sync` (a plain `uv run` would re-sync the full project after `--only-group dev`); `QWI_HOME` set from `$RUNNER_TEMP` in a step (`runner` isn't allowed in `env`); hygiene range = PR `base...HEAD`, push `before..HEAD`, first push `<empty tree>..HEAD` (three-dot fails on a tree); untrusted PR fields reach scripts only through `env`. **Release gate never releases `0.0.0`** (the scaffold version, §8 M0a row), so merging M0a can't publish `v0.0.0`; `check_wheel.py` holds the 1 MB/`qwi/`/LICENSE/NOTICE check. Dry-run locally: file rules pass on `main...HEAD` and from the empty tree; the eval gate fails this branch on the template placeholder (it adds `models.toml` and the mflux pin) and passes with `Eval: n/a — <reason>`; the built wheel passes. Not yet verified on GitHub (no remote; deferred M0a item) | actionlint and the local dry run caught two bugs (the `runner` context, a v0.0.0 release on first merge) before the first push |
+| 2026-10-14 | **Torch excluded from the environment**: `[tool.uv] override-dependencies = ["torch; sys_platform == 'never'"]`. Finding: `uv tree --invert --package torch` → only `mflux 0.22.0` pulls it in (no torchvision), but it **is imported at runtime**, and not by mflux: **transformers 5.19** imports it whenever it's installed (`generation/logits_process.py:21`, unconditional, reached from `configuration_utils` for mlx-lm and mlx-vlm; `image_utils.py:74` for mflux's Qwen-Image-2.1 text-encoder `processor.py`). `USE_TORCH=0` doesn't stop it. mflux's own torch imports are lazy (`.pt`/`.bin` weight loading, ControlNet preprocessors, the Qwen v1 VL processor), none of them on our path. With the override: the Qwen-Image-2.1 modules, mlx-lm, mlx-vlm, transformers tokenizers and streamlit import with `"torch" not in sys.modules`; `mflux-generate-qwen-2.1 --help` works; the lock only lost the torch-only CUDA/triton wheels (no other version changed); `.venv` 1.5 GB → 1.0 GB. `tests/test_dependencies.py` fails if torch comes back. **M0b's processor check is the real-model confirmation** | The torch-free decision (§8) can't hold while torch is installed, since transformers imports it on its own. Excluding it keeps one MLX memory pool by construction instead of by assertion, and saves ~530 MB of tight disk. Chosen by the user over keeping torch CPU-only |
+| 2026-10-14 | **Stay on Python 3.12.** MLX 0.32.4 ships cp312–cp315 macOS arm64 wheels and mflux 0.22.0 / mlx-lm 0.32.0 declare 3.13, but **mlx-vlm 0.7.8 declares only up to 3.12** (pure-Python wheel: it would install, but upstream doesn't claim support). `mflux-generate-qwen-2.1` exists in 0.22.0 with `--base-model`, `--step-cache-ratio` and `--low-ram` | §5.5 says move to 3.13 only if all of them support it. Revisit when mlx-vlm declares 3.13 |
 ---
 
 ## 9. Open questions

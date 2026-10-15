@@ -1,0 +1,82 @@
+[project]
+name = "qwi"
+version = "0.0.0"
+description = "Local text-to-image pipeline for Apple Silicon: Qwen-Image-2.1 on MLX with a Qwen3 safety guard, prompt rewriting and best-of-N reranking. CLI + Streamlit UI."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = [
+    "text-to-image",
+    "image-generation",
+    "generative-ai",
+    "diffusion-models",
+    "apple-silicon",
+    "macos",
+    "mlx",
+    "mflux",
+    "qwen",
+    "qwen-image",
+    "qwen3-vl",
+    "reranking",
+    "content-moderation",
+    "streamlit",
+    "python",
+]
+authors = [
+    { name = "Daryl Lim", email = "73304404+darylalim@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mflux==0.22.0",
+    "mlx-lm>=0.32.0",
+    "mlx-vlm>=0.7.6",
+    "pillow>=12.3.0",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+qwi = "qwi.cli:app"
+
+[project.optional-dependencies]
+ui = [
+    "streamlit>=1.66,<2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.22,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+    "ty>=0.0.87",
+]
+
+[tool.uv]
+# mflux declares torch, but nothing on our path needs it, and once installed transformers
+# imports it at runtime. Never install it (PLAN.md §8, M0a torch check).
+override-dependencies = ["torch; sys_platform == 'never'"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["*.md"]  # ruff 0.17 formats code blocks in Markdown; PLAN.md samples are specs
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "PTH"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qwi"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow' --strict-markers"
+markers = ["slow: loads real models; run explicitly with `-m slow`"]

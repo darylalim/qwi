@@ -1,0 +1,43 @@
+# --- Python / uv ---
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+
+# --- Tool caches ---
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- Runtime data ($QWI_HOME default, §5.7) ---
+var/
+
+# --- Model weights: never commit (§5.7, §5.10) ---
+*.safetensors
+*.gguf
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+
+# --- Generated images (runs, evals, mflux defaults) ---
+*.png
+*.jpg
+*.jpeg
+*.webp
+# ...except small committed test fixtures
+!tests/fixtures/**/*.png
+!tests/fixtures/**/*.jpg
+
+# --- Secrets / local settings ---
+.env
+.env.*
+.streamlit/secrets.toml
+.claude/settings.local.json
+
+# --- macOS ---
+.DS_Store
