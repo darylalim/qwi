@@ -11,9 +11,19 @@ HEADROOM_GB = DEFAULTS.preflight_headroom_bytes / 1e9
 
 
 def test_generate_estimate_reproduces_the_measured_peaks() -> None:
-    assert preflight.generate_gb(768, 768) == pytest.approx(17.78, abs=0.05)
-    assert preflight.generate_gb(2048, 2048) == pytest.approx(37.92, abs=0.05)
-    assert preflight.generate_gb(768, 768, encoder_resident=False) == pytest.approx(13.82, abs=0.05)
+    assert preflight.generate_gb(256, 256) == pytest.approx(12.15, abs=0.01)
+    assert preflight.generate_gb(768, 768) == pytest.approx(17.78, abs=0.01)
+    assert preflight.generate_gb(2048, 2048) == pytest.approx(37.92, abs=0.01)
+    assert preflight.generate_gb(768, 768, encoder_resident=False) == pytest.approx(13.81, abs=0.01)
+
+
+def test_generate_estimate_interpolates_and_extends() -> None:
+    sizes = [128, 256, 512, 768, 1024, 2048, 2560]
+    estimates = [preflight.generate_gb(s, s) for s in sizes]
+    assert estimates == sorted(estimates)  # bigger images never estimate less
+    assert 12.15 < preflight.generate_gb(512, 512) < 17.78
+    # 128²: below the first measurement, the first segment is extended
+    assert preflight.generate_gb(128, 128) == pytest.approx(11.62, abs=0.01)
 
 
 def test_ok_when_the_estimate_fits() -> None:
