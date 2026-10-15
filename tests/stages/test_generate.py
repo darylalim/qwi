@@ -1,0 +1,122 @@
+"""The generate stage against a fake `QwenImage21`: no weights, no GPU."""
+
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from typing import Any, ClassVar
+
+import pytest
+from PIL import Image
+
+from qwi import memory
+from qwi.errors import DeviceOutOfMemory
+from qwi.stages.generate import Generate
+
+MFLUX_MODULE = "mflux.models.qwen21.variants.txt2img.qwen_image_21"
+
+
+class FakeRegistry:
+    def __init__(self) -> None:
+        self.registered: list[Any] = []
+
+    def register(self, callback: Any) -> None:
+        self.registered.append(callback)
+
+
+class FakeQwenImage21:
+    instances: ClassVar[list["FakeQwenImage21"]] = []
+
+    def __init__(self, model_path: str) -> None:
+        self.model_path = model_path
+        self.callbacks = FakeRegistry()
+        self.calls: list[dict[str, Any]] = []
+        FakeQwenImage21.instances.append(self)
+
+    def generate_image(
+        self, *, seed: int, prompt: str, num_inference_steps: int, width: int, height: int
+    ) -> SimpleNamespace:
+        self.calls.append(
+            {
+                "seed": seed,
+                "prompt": prompt,
+                "num_inference_steps": num_inference_steps,
+                "width": width,
+                "height": height,
+            }
+        )
+        for callback in self.callbacks.registered:
+            callback.call_in_loop(t=0)
+        return SimpleNamespace(image=Image.new("RGB", (width, height)))
+
+
+@pytest.fixture(autouse=True)
+def fake_mflux(monkeypatch: pytest.MonkeyPatch) -> None:
+    import mlx.core as mx
+
+    module = ModuleType(MFLUX_MODULE)
+    module.QwenImage21 = FakeQwenImage21  # ty: ignore[unresolved-attribute]  # test fake
+    monkeypatch.setitem(sys.modules, MFLUX_MODULE, module)
+    FakeQwenImage21.instances = []
+    for name in ("set_cache_limit", "clear_cache", "reset_peak_memory"):
+        monkeypatch.setattr(mx, name, lambda *_: None)
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: 13_000_000_000)
+
+
+def test_generates_one_candidate_per_seed_in_order() -> None:
+    stage = Generate(Path("/weights/q4"))
+    stage.load()
+    candidates = stage("a red apple", [7, 8, 9], width=256, height=128, steps=2)
+
+    model = FakeQwenImage21.instances[0]
+    assert model.model_path == "/weights/q4"
+    assert [c.seed for c in candidates] == [7, 8, 9]
+    assert all(c.image.size == (256, 128) for c in candidates)
+    assert all(c.peak_gb == pytest.approx(13.0) for c in candidates)
+    assert model.calls[0] == {
+        "seed": 7,
+        "prompt": "a red apple",
+        "num_inference_steps": 2,
+        "width": 256,
+        "height": 128,
+    }
+
+
+def test_defaults_come_from_config() -> None:
+    stage = Generate(Path("/weights/q4"))
+    stage.load()
+    stage("p", [0])
+    call = FakeQwenImage21.instances[0].calls[0]
+    assert (call["width"], call["height"], call["num_inference_steps"]) == (768, 768, 20)
+
+
+def test_registers_callbacks_and_the_watchdog() -> None:
+    hook = SimpleNamespace(call_in_loop=lambda **_: None)
+    watchdog = memory.SwapWatchdog("generate", read=lambda: 0)
+    stage = Generate(Path("/w"), callbacks=[hook], watchdog=watchdog)
+    stage.load()
+    assert FakeQwenImage21.instances[0].callbacks.registered == [hook, watchdog]
+
+
+def test_watchdog_stops_the_remaining_seeds_after_a_swapping_decode() -> None:
+    # Swap that happens after the last step hook (the VAE decode) is caught before the next seed.
+    swap = iter([0, 0, 10**10])  # start, step hook of seed 0, post-image check of seed 0
+    watchdog = memory.SwapWatchdog("generate", limit_bytes=1, read=lambda: next(swap))
+    watchdog.start()
+    stage = Generate(Path("/w"), watchdog=watchdog)
+    stage.load()
+    with pytest.raises(DeviceOutOfMemory):
+        stage("p", [0, 1, 2])
+    assert len(FakeQwenImage21.instances[0].calls) == 1
+
+
+def test_call_before_load_is_an_error() -> None:
+    with pytest.raises(RuntimeError, match="load"):
+        Generate(Path("/w"))("p", [0])
+
+
+def test_unload_drops_the_model() -> None:
+    stage = Generate(Path("/w"))
+    stage.load()
+    stage.unload()
+    with pytest.raises(RuntimeError, match="load"):
+        stage("p", [0])
