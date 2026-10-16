@@ -3,11 +3,13 @@
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from functools import partial
+from importlib.util import find_spec
 from pathlib import Path
 from types import FrameType
 from typing import Annotated
@@ -351,11 +353,6 @@ def eval_guard(
         raise typer.Exit(1)
 
 
-def _session_dir(arg: str) -> Path:
-    path = Path(arg)
-    return path if (path / "manifest.json").is_file() else paths.EVAL_SET / "sessions" / arg
-
-
 @eval_app.command("session")
 def eval_session(
     a: Annotated[list[str], typer.Option("--a", help="Variant A results (repeatable).")],
@@ -371,7 +368,7 @@ def eval_session(
             [sessions.results_dir(x) for x in a],
             [sessions.results_dir(x) for x in b],
             seed=seed,
-            extend=_session_dir(extend) if extend else None,
+            extend=sessions.session_dir(extend) if extend else None,
         )
     except QwiError as exc:
         raise _fail(exc) from exc
@@ -385,10 +382,36 @@ def eval_compare(
 ) -> None:
     """Unblind a fully judged session, score it, and write report.md (§5.4 decision rule)."""
     try:
-        report, path = sessions.write_report(_session_dir(session), noise_floor)
+        report, path = sessions.write_report(sessions.session_dir(session), noise_floor)
     except QwiError as exc:
         raise _fail(exc) from exc
     o = report.overall
     typer.echo(f"A = {report.a}, B = {report.b}: {o.wins} wins, {o.losses} losses, {o.ties} ties")
     typer.echo(f"B is {report.verdict}: {report.reason}")
     typer.echo(f"report {path}")
+
+
+@eval_app.command("review")
+def eval_review(
+    session: Annotated[str, typer.Argument(help="Session folder, or its name in eval/sessions.")],
+    port: Annotated[int, typer.Option(help="Local port for the app.")] = DEFAULTS.review_port,
+) -> None:
+    """Judge a session's pairs blind in the browser; each Save writes review.csv (§5.4)."""
+    folder = sessions.session_dir(session).resolve()
+    try:
+        sessions.open_session(folder)  # fail here, not in the browser
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    if find_spec("streamlit") is None:
+        typer.echo("The review app needs the ui extra: uv sync --all-extras", err=True)
+        raise typer.Exit(1)
+    app_path = Path(__file__).parent / "ui" / "review_app.py"
+    command = [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)]
+    env = {**os.environ, sessions.REVIEW_SESSION_ENV: str(folder)}
+    typer.echo(f"reviewing {folder.name} at http://localhost:{port} (Ctrl-C to stop)")
+    try:
+        # From the repo root, so Streamlit reads .streamlit/config.toml (localhost only).
+        code = subprocess.call(command, env=env, cwd=paths.REPO)
+    except KeyboardInterrupt:  # the app got the same Ctrl-C and is shutting down
+        code = 0
+    raise typer.Exit(code)
