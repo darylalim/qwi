@@ -173,10 +173,13 @@ class EvalRunner:
             prompts = [p for p in prompts if p.id in request.only]
         results_dir = paths.eval_results_dir() / request.name
         images_dir = paths.eval_dir() / request.name
-        if results_dir.exists():
-            raise EvalExists(f"{results_dir} exists; pick another --variant name")
+        # Only saved images make a variant: a run that failed before its first image (e.g. a
+        # SwapRisk at generate) can be retried under the same name; run.log keeps both attempts.
+        saved = results_dir / "results.jsonl"
+        if saved.exists() and saved.stat().st_size:
+            raise EvalExists(f"{results_dir} has results; pick another --variant name")
         with RunLock():
-            results_dir.mkdir(parents=True)
+            results_dir.mkdir(parents=True, exist_ok=True)
             images_dir.mkdir(parents=True, exist_ok=True)
             result = EvalResult(request.name, results_dir, images_dir, [])
             with logs.run_log(images_dir, request.verbose):

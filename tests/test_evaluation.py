@@ -205,6 +205,30 @@ def test_results_are_never_overwritten(r: Runner) -> None:
         r.run(only=["count"])
 
 
+def test_partial_results_are_never_overwritten(r: Runner) -> None:
+    r.fail_at = (1, RuntimeError("[metal::malloc] Resource limit (499000) exceeded."))
+    assert len(r.run(only=["count"]).rows) == 1
+    r.fail_at = None
+    with pytest.raises(EvalExists):
+        r.run(only=["count"])
+
+
+def test_a_run_that_saved_no_images_can_be_retried(r: Runner) -> None:
+    r.fail_at = (0, RuntimeError("[metal::malloc] Resource limit (499000) exceeded."))
+    failed = r.run(only=["count"])
+    assert (failed.status, failed.rows) == ("error", [])
+    r.fail_at = None
+    retried = r.run(only=["count"])
+    assert retried.status == "ok"
+    assert len(retried.rows) == 2
+    started = [
+        line
+        for line in logs.read(retried.images_dir / "run.log")
+        if line["event"] == "eval_started"
+    ]
+    assert len(started) == 2  # the failed attempt stays in the log
+
+
 def test_cancel_keeps_finished_rows(r: Runner) -> None:
     cancel = threading.Event()
 
