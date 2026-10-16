@@ -433,3 +433,110 @@ def write_report(session: Path, noise_floor: int = 0) -> tuple[Report, Path]:
     path = session / "report.md"
     path.write_text(render(report), encoding="utf-8")
     return report, path
+
+
+# --- The review app's data layer (`qwi eval review`, §5.4 "Eval review page, session mode") -
+
+SIDES = ("left", "right")
+REVIEW_SESSION_ENV = "QWI_REVIEW_SESSION"  # how `qwi eval review` tells the app which session
+HINT_KEYS = ("rewrite", "ocr", "ocr_exact", "rerank_prob", "white_border_share")
+
+
+@dataclass(frozen=True)
+class Judgment:
+    """One item's review: pass/fail per check and side, plus the optional preference and notes."""
+
+    left: dict[str, str]  # check → "pass" | "fail" | "" (not judged yet)
+    right: dict[str, str]
+    prefer: str = ""  # "left" | "right" | "same" | ""
+    notes: str = ""
+
+    def complete(self, checks: tuple[str, ...]) -> bool:
+        return all(self.left.get(c) in RESULTS and self.right.get(c) in RESULTS for c in checks)
+
+
+@dataclass(frozen=True)
+class Side:
+    """What the app shows for one side of an item. `hints` stay hidden until it's saved."""
+
+    image: Path
+    prompt: str
+    hints: dict[str, Any]
+
+
+@dataclass
+class ReviewSession:
+    folder: Path
+    items: list[Item]
+    sides: dict[tuple[str, str], Side]  # (item id, "left" | "right") → what to show
+
+    @property
+    def name(self) -> str:
+        return self.folder.name
+
+
+def open_session(folder: Path) -> ReviewSession:
+    """Items in their shuffled order, each side's image and hints. Variant names stay out."""
+    manifest = _load_manifest(folder)
+    items = [Item.from_dict(i) for i in manifest["items"]]
+    by_variant: dict[str, dict[tuple[str, int], tuple[Path, dict[str, Any]]]] = {}
+    for variant in ("a", "b"):
+        found: dict[tuple[str, int], tuple[Path, dict[str, Any]]] = {}
+        for results in manifest[variant]["results"]:
+            images = paths.eval_dir() / Path(results).name  # §5.7: images live under $QWI_HOME
+            _, rows = load_results([Path(results)])
+            found |= {key: (images / row["image"], row) for key, row in rows.items()}
+        by_variant[variant] = found
+    sides: dict[tuple[str, str], Side] = {}
+    for item in items:
+        for side in SIDES:
+            image, row = by_variant[item.variant_of(side)][(item.prompt_id, item.seed)]
+            hints = {k: row[k] for k in HINT_KEYS if row.get(k) is not None}
+            hints["seconds"] = round(sum(row.get("seconds", {}).values()), 1)
+            sides[(item.item, side)] = Side(image, row["prompt"], hints)
+    return ReviewSession(folder, items, sides)
+
+
+def read_judgments(folder: Path) -> dict[str, Judgment]:
+    left: dict[str, dict[str, str]] = defaultdict(dict)
+    right: dict[str, dict[str, str]] = defaultdict(dict)
+    extra: dict[str, tuple[str, str]] = {}
+    for row in _read_review(folder):
+        if row["check"]:
+            left[row["item"]][row["check"]] = row["left"].lower()
+            right[row["item"]][row["check"]] = row["right"].lower()
+        else:
+            extra[row["item"]] = (row["prefer"].lower(), row["notes"])
+    ids = left.keys() | extra.keys()
+    return {i: Judgment(left[i], right[i], *extra.get(i, ("", ""))) for i in ids}
+
+
+def save_judgment(folder: Path, item: Item, judgment: Judgment) -> None:
+    """Rewrite `review.csv` with this item's rows replaced; atomic, so a crash loses nothing."""
+    bad = {*judgment.left.values(), *judgment.right.values()} - {*RESULTS, ""}
+    if bad or judgment.prefer not in (*PREFER, ""):
+        raise SessionError(f"{item.item}: results must be pass/fail, prefer left/right/same")
+    rows = _read_review(folder)
+    if not any(r["item"] == item.item for r in rows):
+        raise SessionError(f"{item.item} is not in {folder.name}/review.csv")
+    for row in rows:
+        if row["item"] != item.item:
+            continue
+        if row["check"]:
+            row["left"] = judgment.left.get(row["check"], "")
+            row["right"] = judgment.right.get(row["check"], "")
+        else:
+            row["prefer"], row["notes"] = judgment.prefer, judgment.notes
+    target = folder / "review.csv"
+    tmp = target.with_suffix(".csv.tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, REVIEW_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp.replace(target)
+
+
+def session_dir(arg: str) -> Path:
+    """A session given as a path, or as a name under `eval/sessions/`."""
+    path = Path(arg)
+    return path if (path / "manifest.json").is_file() else paths.EVAL_SET / "sessions" / arg

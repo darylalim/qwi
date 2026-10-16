@@ -38,6 +38,9 @@ class Defaults:
     preflight_headroom_bytes: int = 2 * GiB
     # Free disk that must remain after any download, and before a run starts (PLAN.md §5.7).
     min_free_disk_bytes: int = 20 * 10**9
+    # Streamlit ports: the main UI and the eval review app run side by side (PLAN.md §5.6).
+    ui_port: int = 8501
+    review_port: int = 8502
     # run.log / app log level; `-v` or QWI_LOG_LEVEL=DEBUG overrides it (§5.11 "Logs").
     log_level: str = "INFO"
 

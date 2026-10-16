@@ -1,0 +1,9 @@
+# Streamlit settings for `qwi ui` and `qwi eval review` (PLAN.md §5.6). Theme sections come in M5c.
+
+[server]
+address = "localhost"     # never expose on the LAN: it's a local, single-user tool
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
