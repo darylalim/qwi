@@ -298,10 +298,20 @@ def eval_run(
     steps: Annotated[int, typer.Option(min=1)] = DEFAULTS.steps,
     width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
     height: Annotated[int, typer.Option(min=16)] = DEFAULTS.height,
+    guard_mode: Annotated[GuardMode, typer.Option(help="Guard policy column.")] = GUARD_MODE,
+    no_rewrite: Annotated[
+        bool, typer.Option("--no-rewrite", help="Generate the prompts as written.")
+    ] = False,
+    rewrite_style: Annotated[
+        RewriteStyle, typer.Option(help="Rewriter system prompt.")
+    ] = REWRITE_STYLE,
     allow_swap: Annotated[bool, typer.Option("--allow-swap")] = False,
     verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False,
 ) -> None:
-    """Generate the eval set (12 prompts x seeds) for one variant (§5.4 "Protocol")."""
+    """Generate the eval set (12 prompts x seeds) for one variant (§5.4 "Protocol").
+
+    Runs guard → rewrite → guard → encode → generate, each model loaded once.
+    """
     if ctx.invoked_subcommand is not None:
         return
     if variant is None:
@@ -314,6 +324,9 @@ def eval_run(
         width=width,
         height=height,
         steps=steps,
+        guard_mode=guard_mode.value,
+        rewrite=not no_rewrite,
+        rewrite_style=rewrite_style.value,
         allow_swap=allow_swap,
         verbose=verbose,
     )
@@ -323,6 +336,8 @@ def eval_run(
     except QwiError as exc:
         raise _fail(exc) from exc
     typer.echo(f"{result.status}: {len(result.rows)} images")
+    if result.blocked:
+        typer.echo(f"  blocked  {', '.join(result.blocked)} (no images)", err=True)
     typer.echo(f"  results  {result.results_dir}")
     typer.echo(f"  images   {result.images_dir}")
     if result.error:

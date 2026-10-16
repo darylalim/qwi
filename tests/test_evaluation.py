@@ -13,13 +13,13 @@ import pytest
 from PIL import Image
 from typer.testing import CliRunner
 
-from qwi import cli, evaluation, lock, memory, paths, preflight
+from qwi import cli, evaluation, lock, logs, memory, paths, preflight
 from qwi.errors import EvalExists, EvalSetError
 from qwi.evaluation import EvalRequest, EvalRunner
-from qwi.events import CandidateReady, Event
-from qwi.stages import guard
+from qwi.events import CandidateReady, Event, GuardVerdict
+from qwi.stages import guard, rewrite
 
-from .test_pipeline import LIMIT, FakeGuard, FakeStage, vm
+from .test_pipeline import LIMIT, REWRITE, SAFE, FakeGuard, FakeRewrite, FakeStage, vm
 
 DAY = date(2026, 10, 15)
 
@@ -30,13 +30,37 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory, "vm_stat", lambda: vm(30 * 10**9))
 
 
+class EchoRewrite(FakeRewrite):
+    """Rewrites by wrapping the prompt, so quoted text survives and every rewrite is used."""
+
+    def __call__(self, prompt: str) -> rewrite.Rewritten:
+        self.raw = f"A detailed picture: {prompt}"
+        return super().__call__(prompt)
+
+
 class Runner:
     def __init__(self) -> None:
         self.stages: list[FakeStage] = []
         self.fail_at: tuple[int, BaseException] | None = None
+        self.guards: list[FakeGuard] = []
+        self.rewriters: list[EchoRewrite] = []
+        self.guard_reply = SAFE
+        self.roles: list[str] = []
         self.runner = EvalRunner(
-            self._make, resolve=lambda role: Path("/w"), startup=lambda r: None
+            self._make,
+            resolve=lambda role: Path("/w"),
+            startup=self.roles.extend,
+            make_guard=self._guard,
+            make_rewrite=self._rewrite,
         )
+
+    def _guard(self, model_path: Path) -> FakeGuard:
+        self.guards.append(FakeGuard(self.guard_reply))
+        return self.guards[-1]
+
+    def _rewrite(self, model_path: Path, style: str) -> EchoRewrite:
+        self.rewriters.append(EchoRewrite("", style))
+        return self.rewriters[-1]
 
     def _make(self, model_path: Path, callbacks: Sequence[object], _: object) -> FakeStage:
         stage = FakeStage(callbacks)
@@ -102,7 +126,16 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
     assert stage.unloaded
     assert stage.encoded is not None
     assert len(stage.encoded[0]) == 12  # every prompt encoded in one batch, before generating
+    assert all(e.startswith("A detailed picture: ") for e in stage.encoded[0])  # the rewrites
     assert not lock.is_held()
+    # Guard and rewriter load once each; the guard checks 12 prompts and then 12 rewrites.
+    (checker,) = r.guards
+    (rewriter,) = r.rewriters
+    assert len(checker.seen) == 24
+    assert len(rewriter.seen) == 12
+    assert (checker.unloaded, rewriter.unloaded) == (True, True)
+    assert r.roles == ["guard", "rewrite", "image"]
+    assert result.blocked == []
 
     lines = (result.results_dir / "results.jsonl").read_text().splitlines()
     rows = [json.loads(line) for line in lines]
@@ -115,8 +148,22 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
     first = rows[0]
     assert first["image"] == "text-en_1000.png"
     assert (result.images_dir / first["image"]).is_file()
-    assert first["config"] == {"width": 64, "height": 64, "steps": 2, "encoder": "A-q4"}
-    assert (first["rerank_margin"], first["ocr"], first["rewrite"]) == (None, None, None)
+    assert first["config"] == {
+        "width": 64,
+        "height": 64,
+        "steps": 2,
+        "encoder": "A-q4",
+        "rewrite": "short",
+        "guard_mode": "default",
+    }
+    assert (first["rerank_margin"], first["ocr"]) == (None, None)
+    rewritten = f"A detailed picture: {first['prompt']}"
+    assert (first["rewrite"], first["generated_prompt"]) == (rewritten, rewritten)
+    assert first["rewrite_fallback_reason"] is None
+    assert first["guard"]["decision"] == "allow"
+    assert first["guard"]["rewrite"]["level"] == "Safe"
+    assert set(first["seconds"]) == {"guard", "rewrite", "generate"}
+    assert set(first["peak_gb"]) == {"guard", "rewrite", "generate"}
     assert first["swap_gb"] == 0.0
     assert first["preflight"]["decision"] == "ok"
     isolated = next(row for row in rows if row["id"] == "isolated")
@@ -182,6 +229,98 @@ def test_a_failure_mid_run_keeps_rows_and_logs_the_error(r: Runner) -> None:
     assert not lock.is_held()
 
 
+def test_no_rewrite_generates_the_prompts_as_written(r: Runner) -> None:
+    result = r.run(rewrite=False, only=["count"])
+    assert r.rewriters == []
+    assert r.roles == ["guard", "image"]
+    (row, _) = result.rows
+    assert (row["rewrite"], row["rewrite_fallback_reason"]) == (None, None)
+    assert row["generated_prompt"] == row["prompt"]
+    assert row["config"]["rewrite"] == "none"
+    assert row["guard"]["rewrite"] is None
+    assert set(row["seconds"]) == {"guard", "generate"}
+    assert r.stages[0].encoded == ([row["prompt"]], "A-q4")
+
+
+def test_rewrite_style_reaches_the_stage_and_the_rows(r: Runner) -> None:
+    result = r.run(rewrite_style="long", only=["count"])
+    assert r.rewriters[0].style == "long"
+    assert result.rows[0]["config"]["rewrite"] == "long"
+
+
+def test_a_prompt_the_guard_blocks_gets_no_images(
+    r: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def judge(self: FakeGuard, text: str) -> guard.Verdict:
+        self.seen.append(text)
+        blocked = "apples" in text
+        return guard.parse("Safety: Unsafe\nCategories: Violent" if blocked else SAFE)
+
+    monkeypatch.setattr(FakeGuard, "__call__", judge)
+    events: list[Event] = []
+    result = r.run(events.append, only=["count", "isolated"], seeds=[7])
+    assert result.status == "ok"
+    assert result.blocked == ["count"]  # "Exactly five red apples ..."
+    assert [row["id"] for row in result.rows] == ["isolated"]
+    assert r.rewriters[0].seen == [evaluation.load_prompts()[10].prompt]  # never rewritten
+    assert r.stages[0].encoded is not None
+    assert len(r.stages[0].encoded[0]) == 1
+    (verdict,) = [e for e in events if isinstance(e, GuardVerdict)]
+    assert verdict.decision == "block"
+    assert verdict.summary.startswith("count: input prompt is Unsafe (Violent)")
+
+
+def test_every_prompt_blocked_skips_the_image_model(r: Runner) -> None:
+    r.guard_reply = "Safety: Unsafe\nCategories: Jailbreak"
+    result = r.run(only=["count", "isolated"])
+    assert (result.status, result.rows, result.blocked) == ("ok", [], ["count", "isolated"])
+    assert r.stages == []
+    assert r.rewriters[0].seen == []
+
+
+def test_a_rewrite_fallback_is_recorded_and_the_prompt_generated(
+    r: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fixed(self: EchoRewrite, prompt: str) -> rewrite.Rewritten:
+        self.raw = REWRITE  # drops the quoted sign text
+        return FakeRewrite.__call__(self, prompt)
+
+    monkeypatch.setattr(EchoRewrite, "__call__", fixed)
+    result = r.run(only=["text-en"], seeds=[7])
+    (row,) = result.rows
+    assert row["rewrite_fallback_reason"] == "quoted_text_missing"
+    assert row["generated_prompt"] == row["prompt"]
+    assert row["rewrite"] == REWRITE  # the rejected text, for the record
+    assert row["guard"]["rewrite"] is None  # no second pass on a fallback
+
+
+def test_rewrite_time_is_split_across_a_prompts_seeds(
+    r: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = iter(range(1000))  # every perf_counter() call advances one second
+    monkeypatch.setattr(evaluation.time, "perf_counter", lambda: float(next(clock)))
+    result = r.run(only=["count"], seeds=[1000, 1001])
+    first, second = result.rows
+    assert first["seconds"]["rewrite"] == second["seconds"]["rewrite"] == 0.5  # 1 s over 2 seeds
+    assert first["seconds"]["guard"] == 0.5
+
+
+def test_a_rewriter_failure_is_an_error_in_the_rewrite_stage(
+    r: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: EchoRewrite, prompt: str) -> rewrite.Rewritten:
+        raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+
+    monkeypatch.setattr(EchoRewrite, "__call__", broken)
+    result = r.run(only=["count"])
+    assert result.error is not None
+    assert result.error["type"] == "DeviceOutOfMemory"
+    assert (r.guards[0].unloaded, r.rewriters[0].unloaded) == (True, True)
+    assert r.stages == []
+    lines = logs.read(result.images_dir / "run.log", "error")
+    assert lines[0]["stage"] == "rewrite"
+
+
 runner = CliRunner()
 
 
@@ -216,9 +355,30 @@ def test_cli_runs_the_eval_and_reports_paths(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
+def test_cli_passes_the_rewrite_and_guard_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[EvalRequest] = []
+
+    class FakeRunner:
+        def run(self, request: EvalRequest, on_event: Any) -> evaluation.EvalResult:
+            seen.append(request)
+            result = evaluation.EvalResult("d_v", Path("/r"), Path("/i"), [{}])
+            result.blocked = ["count"]
+            return result
+
+    monkeypatch.setattr(cli, "EvalRunner", FakeRunner)
+    assert runner.invoke(cli.app, ["eval", "--variant", "a"]).exit_code == 0
+    args = ["eval", "--variant", "b", "--no-rewrite", "--rewrite-style", "long"]
+    result = runner.invoke(cli.app, [*args, "--guard-mode", "loose"])
+    assert result.exit_code == 0
+    assert "blocked  count (no images)" in result.stderr
+    assert [(r.rewrite, r.rewrite_style, r.guard_mode) for r in seen] == [
+        (True, "short", "default"),
+        (False, "long", "loose"),
+    ]
+
+
 # --- Guard false-positive set (§5.4) -------------------------------------------------------
 
-SAFE = "Safety: Safe\nCategories: None"
 GUARD_SET = {  # PLAN.md §5.4: id → the category it might falsely trip
     "g-knight": "Violent",
     "g-swim": "Sexual Content or Sexual Acts",

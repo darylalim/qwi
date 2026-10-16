@@ -155,7 +155,7 @@ def test_pipeline_runs_end_to_end() -> None:
 
 
 def test_eval_runner_smoke() -> None:
-    # Stage-batched eval on the real model; results go to the tmp eval set (conftest).
+    # Stage-batched eval on the real models; results go to the tmp eval set (conftest).
     request = EvalRequest(
         "smoke", seeds=[0], only=["count", "isolated"], width=256, height=256, steps=2
     )
@@ -164,4 +164,7 @@ def test_eval_runner_smoke() -> None:
     assert [row["id"] for row in result.rows] == ["count", "isolated"]
     assert all((result.images_dir / row["image"]).is_file() for row in result.rows)
     assert 0.0 <= result.rows[1]["white_border_share"] <= 1.0
+    # Guard → rewrite → guard ran first (§5.4 stage order): each row records the rewrite.
+    assert all(row["rewrite"] and row["guard"]["decision"] != "block" for row in result.rows)
+    assert all("rewrite" in row["seconds"] for row in result.rows)
     assert_torch_free()
