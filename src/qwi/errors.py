@@ -141,7 +141,7 @@ class EvalSetError(QwiError):
 
 
 class EvalExists(QwiError):
-    """The variant's results folder already exists: eval results are never overwritten."""
+    """The variant already has `results.jsonl`: eval results are never overwritten."""
 
     status = None
 
