@@ -1,7 +1,7 @@
 """The runtime never imports torch (PLAN.md §8): run each stage's real code, then check sys.modules.
 
 Slow: loads real models from the local HF cache at the pinned `models.toml` revisions, offline.
-M1, M2 and M3 each add a test here for their new stage (PLAN.md §6).
+M1, M2, M3 and M4 each add a test here for their new stage (PLAN.md §6).
 """
 
 import gc
@@ -17,6 +17,7 @@ from qwi.config import DEFAULTS
 from qwi.evaluation import EvalRequest, EvalRunner
 from qwi.events import DenoiseStep, Event
 from qwi.pipeline import GenerateRequest, Pipeline
+from qwi.stages.encode import EncodeB
 from qwi.stages.generate import Generate
 from qwi.stages.guard import Guard
 from qwi.stages.ocr import Ocr, match
@@ -179,6 +180,27 @@ def test_encode_then_generate_matches_stock_mflux() -> None:
     assert all((c.image.size, c.image.mode) == ((256, 256), "RGB") for c in candidates)
     assert np.array_equal(np.asarray(candidates[0].image), expected)
     assert all(0 < c.peak_gb < 24 for c in candidates)
+    assert_torch_free()
+
+
+def test_option_b_embeddings_generate_an_image() -> None:
+    # M4: Qwen3-VL-8B encodes, the image model only reads prompt_cache (its encoder never loads).
+    encoder = EncodeB(models.resolve("rewrite"))
+    encoder.load()
+    try:
+        embeds = encoder(["a red apple"])
+    finally:
+        encoder.unload()
+    stage = Generate(models.resolve("image"))
+    stage.load()
+    try:
+        stage.inject(embeds)
+        (candidate,) = stage("a red apple", [0], width=256, height=256, steps=2)
+    finally:
+        stage.unload()
+    assert embeds[0].encoder == "B"
+    assert (candidate.image.size, candidate.image.mode) == ((256, 256), "RGB")
+    assert 0 < candidate.peak_gb < 24
     assert_torch_free()
 
 

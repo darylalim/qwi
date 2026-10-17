@@ -10,6 +10,7 @@ from PIL import Image
 
 from qwi import memory
 from qwi.errors import DeviceOutOfMemory
+from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Generate
 
 MFLUX_MODULE = "mflux.models.qwen21.variants.txt2img.qwen_image_21"
@@ -171,6 +172,27 @@ def test_encode_keys_an_empty_prompt_by_the_exact_string(prompt: str) -> None:
     stage.load()
     stage.encode([prompt])
     assert prompt in FakeQwenImage21.instances[0].prompt_cache
+
+
+def test_inject_caches_option_b_embeddings_without_running_the_encoder(
+    mlx_calls: list[str],
+) -> None:
+    # FakePromptEncoder asserts the encoder is loaded: inject() must never call it.
+    import mlx.core as mx
+
+    empty, other = (PromptEmbeds(p, mx.zeros((1, 2, 4)), mx.ones((1, 2)), "B") for p in ("", "x"))
+    stage = Generate(Path("/w"))
+    stage.load()
+    stage.inject([empty, other])
+    model = FakeQwenImage21.instances[0]
+    assert model.prompt_cache == {"": (empty.embeds, empty.mask), "x": (other.embeds, other.mask)}
+    assert model.text_encoder is None
+    assert mlx_calls == ["clear_cache"]
+
+
+def test_inject_before_load_is_an_error() -> None:
+    with pytest.raises(RuntimeError, match="load"):
+        Generate(Path("/w")).inject([])
 
 
 def test_encode_before_load_is_an_error() -> None:
