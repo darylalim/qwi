@@ -2,7 +2,8 @@
 
 `encode()` computes the prompt's embeddings once with the pack's own encoder (option A), caches
 them in `model.prompt_cache`, and evicts the encoder before denoising: stock mflux would keep it
-resident (≈ 4 GB at q4, §8). Seeds then run in sequence on one loaded model, all from the cache.
+resident (≈ 4 GB at q4, §8). `inject()` does the caching and eviction for embeddings computed
+elsewhere (option B). Seeds then run in sequence on one loaded model, all from the cache.
 """
 
 import time
@@ -78,13 +79,22 @@ class Generate:
                 text_encoder=model.text_encoder,
             )
             mx.eval(embeds, mask)  # materialize first, so evicting frees the weights now (§4)
+            out.append(PromptEmbeds(prompt, embeds, mask, encoder))
+        self.inject(out)
+        return out
+
+    def inject(self, embeds: Sequence[PromptEmbeds]) -> None:
+        """Cache embeddings from any encoder, then drop the pack's encoder (§3 `prompt_cache`).
+
+        Option B calls this alone: mflux's weights are lazy, so its encoder is never read.
+        """
+        model = self._require()
+        for e in embeds:
             # Keyed by the exact prompt: mflux encodes an empty prompt as " " but looks up the
             # original string, which would miss and call the evicted encoder.
-            model.prompt_cache[prompt] = (embeds, mask)
-            out.append(PromptEmbeds(prompt, embeds, mask, encoder))
+            model.prompt_cache[e.prompt] = (e.embeds, e.mask)
         model.text_encoder = None  # ty: ignore[invalid-assignment]  # evict (mflux types it non-None)
         memory.evict()
-        return out
 
     def _require(self) -> "QwenImage21":
         if self._model is None:
