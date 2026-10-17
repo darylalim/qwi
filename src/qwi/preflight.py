@@ -35,7 +35,7 @@ EVICTED_SAVING_GB = 2.83
 # Peaks from the M0b smoke test, load + one short generation or forward (§8 2026-10-15): guard
 # 1.62 GiB (1.74 GB); rewrite 5.59 GiB (6.0 GB) plus the guard, which stays loaded through it
 # (§4); rerank 3.54 GiB (3.8 GB) for one 768² image.
-STATIC_GB = {"guard": 1.74, "rewrite": 7.74, "rerank": 3.8}
+STATIC_GB = {"guard": 1.74, "rewrite": 7.74, "rerank": 3.8, "ocr": 3.8}
 
 
 def generate_gb(width: int, height: int, encoder_resident: bool = True) -> float:

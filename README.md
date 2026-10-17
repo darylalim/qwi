@@ -11,6 +11,7 @@ This repository contains no model weights. Models are downloaded separately and 
 | guard | [`mlx-community/Qwen3Guard-Gen-0.6B-MLX`](https://huggingface.co/mlx-community/Qwen3Guard-Gen-0.6B-MLX) | `919a4577` | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
 | rewrite | [`mlx-community/Qwen3-VL-8B-Instruct-4bit`](https://huggingface.co/mlx-community/Qwen3-VL-8B-Instruct-4bit) | `defcdea7` | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
 | rerank | [`mlx-community/Qwen3-VL-Reranker-2B-8bit`](https://huggingface.co/mlx-community/Qwen3-VL-Reranker-2B-8bit) | `e9cd8bbe` | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
+| ocr | [`mlx-community/Qwen3-VL-2B-Instruct-8bit`](https://huggingface.co/mlx-community/Qwen3-VL-2B-Instruct-8bit) | `b0338e0e` | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
 | image | [`mlx-community/Qwen-Image-2.1-mflux-q4`](https://huggingface.co/mlx-community/Qwen-Image-2.1-mflux-q4) | `746a5855` | [Qwen Research License (research and non-commercial use)](https://huggingface.co/Qwen/Qwen-Image-2.1) |
 
 **Qwen-Image-2.1** is under the **Qwen Research License** (research and non-commercial use), and that applies to images generated with it. Repacks of it, such as `mlx-community/Qwen-Image-2.1-mflux-q4` (the `image` row above), are treated as Qwen Research License too, whatever their card says.

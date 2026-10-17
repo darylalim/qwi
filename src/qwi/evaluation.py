@@ -2,14 +2,15 @@
 
 Stage-batched, not one pipeline per prompt: the runner holds the lock once and runs guard (all
 prompts) → rewrite (all) → guard on the rewrites (all) → encode (all) → generate (prompts x
-seeds) → rerank (all images), loading each model once (§5.4 stage order). Each seed is its own
+seeds) → OCR (text prompts' images) → rerank (all images), loading each model once (§5.4 stage
+order). Each seed is its own
 sample (no best-of-N). A prompt the guard blocks gets no images; the result lists it. Images go
 to `$QWI_HOME/eval/<date>_<variant>/`; `results.jsonl` (one row per image, appended as each image
-is saved, rewritten once with the reranker scores) and `review.csv` go to the committed
-`eval/results/<date>_<variant>/`.
+is saved, rewritten with the OCR hints and again with the reranker scores) and `review.csv` go to
+the committed `eval/results/<date>_<variant>/`.
 
 `rescore()` scores saved images under another reranker instruction into `rerank_<label>.jsonl`
-beside them, without regenerating (§5.4 "Score once, compare offline"). OCR is still to come.
+beside them, without regenerating (§5.4 "Score once, compare offline").
 """
 
 import csv
@@ -42,6 +43,8 @@ from qwi.lock import RunLock
 from qwi.pipeline import (
     ENCODER,
     GuardFactory,
+    OcrFactory,
+    OcrStage,
     RerankFactory,
     RerankStage,
     RewriteFactory,
@@ -49,15 +52,18 @@ from qwi.pipeline import (
     StageFactory,
     default_generate_stage,
     default_guard_stage,
+    default_ocr_stage,
     default_rerank_stage,
     default_rewrite_stage,
     ignore_event,
 )
-from qwi.stages import guard, rerank
+from qwi.stages import guard, ocr, rerank
+from qwi.stages.rewrite import quoted
 
 ISOLATED_WHITE = 235  # all channels ≥ this counts as near-white (§5.4 automated checks)
 ISOLATED_BORDER = 0.10  # outer 10% of each side
 ISOLATED_MIN_SHARE = 0.9
+TEXT_TAG = "text"  # eval prompts whose images get the OCR hint (§5.4 automated checks)
 REVIEW_COLUMNS = ["item", "prompt_id", "seed", "image", "check", "result", "notes"]
 # `qwi eval rescore --label`: instructions the calibration compares (§5.4 "Best-of-4 calibration").
 RERANK_PRESETS = {
@@ -134,7 +140,7 @@ class EvalRequest:
 
     @property
     def roles(self) -> list[str]:
-        return ["guard", *(["rewrite"] if self.rewrite else []), "image", "rerank"]
+        return ["guard", *(["rewrite"] if self.rewrite else []), "image", "ocr", "rerank"]
 
 
 @dataclass
@@ -169,6 +175,7 @@ class EvalRunner:
         make_guard: GuardFactory = default_guard_stage,
         make_rewrite: RewriteFactory = default_rewrite_stage,
         make_rerank: RerankFactory = default_rerank_stage,
+        make_ocr: OcrFactory = default_ocr_stage,
     ) -> None:
         self._make_generate = make_generate
         self._resolve = resolve
@@ -176,6 +183,7 @@ class EvalRunner:
         self._make_guard = make_guard
         self._make_rewrite = make_rewrite
         self._make_rerank = make_rerank
+        self._make_ocr = make_ocr
         self._stage = "startup"
 
     def run(
@@ -212,6 +220,7 @@ class EvalRunner:
                     allowed = [p for p in prompts if p.id not in result.blocked]
                     self._stage = "generate"
                     self._generate(request, allowed, prepared, result, on_event)
+                    self._ocr(request, result, on_event)
                     self._rerank(request, result, on_event)
                 except (Exception, KeyboardInterrupt) as exc:
                     failure = errors.classify(exc, self._stage)
@@ -407,6 +416,40 @@ class EvalRunner:
         finally:
             generator.unload()
 
+    def _ocr(
+        self, request: EvalRequest, result: EvalResult, on_event: Callable[[Event], None]
+    ) -> None:
+        """Transcribe each text prompt's images and check its quoted strings (§5.4 hints).
+
+        Runs only after generation finished, like rerank; `results.jsonl` is rewritten once.
+        """
+        rows = [row for row in result.rows if TEXT_TAG in row["tags"]]
+        if not rows:
+            return
+        self._check("ocr", request)
+        watchdog = memory.SwapWatchdog("ocr", preflight.swap_limit_bytes(request.allow_swap))
+        watchdog.start()
+        reader = self._make_ocr(self._resolve("ocr"))
+        on_event(StageStarted("ocr"))
+        started = time.perf_counter()
+        try:
+            with memory.track_peak() as peak:
+                reader.load()
+                read = ocr_rows(reader, rows, result.images_dir, request.cancel, watchdog)
+        finally:
+            reader.unload()
+        for row, (text, seconds) in zip(rows, read, strict=True):
+            row |= {
+                "ocr": text,
+                "ocr_exact": ocr.exact(quoted(row["prompt"]), text),
+                "ocr_match": ocr.match(quoted(row["prompt"]), text),
+                "seconds": row["seconds"] | {"ocr": round(seconds, 2)},
+                "peak_gb": row["peak_gb"] | {"ocr": round(peak.gb, 2)},
+            }
+        write_rows(result.results_dir / "results.jsonl", result.rows)
+        on_event(StageFinished("ocr", time.perf_counter() - started, peak.gb))
+        logs.event(logging.INFO, "ocr", "ocr_read", "read", images=len(rows))
+
     def _rerank(
         self, request: EvalRequest, result: EvalResult, on_event: Callable[[Event], None]
     ) -> None:
@@ -473,8 +516,9 @@ class EvalRunner:
             },
             "rerank_margin": None,  # M3
             "rerank_prob": None,  # M3
-            "ocr": None,  # M3, text-* prompts
-            "ocr_exact": None,  # M3
+            "ocr": None,  # text-* prompts: the transcription
+            "ocr_exact": None,  # quoted string → appears verbatim in it
+            "ocr_match": None,  # the same, ignoring case (the model title-cases all caps)
         }
         if prompt.id == "isolated":
             share = white_border_share(image)
@@ -506,6 +550,25 @@ def score_rows(
         if cancel.is_set():
             raise GenerationCancelled()
     return scored
+
+
+def ocr_rows(
+    reader: OcrStage,
+    rows: Sequence[dict[str, Any]],
+    images_dir: Path,
+    cancel: threading.Event,
+    watchdog: memory.SwapWatchdog,
+) -> list[tuple[str, float]]:
+    """Each row's saved image transcribed: (text, seconds) per row, like `score_rows`."""
+    read: list[tuple[str, float]] = []
+    for row in rows:
+        started = time.perf_counter()
+        text = reader(images_dir / row["image"])
+        read.append((text, time.perf_counter() - started))
+        watchdog.check()
+        if cancel.is_set():
+            raise GenerationCancelled()
+    return read
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:

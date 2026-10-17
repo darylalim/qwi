@@ -19,6 +19,7 @@ HINT_LABELS = {
     "rewrite": "Rewrite",
     "ocr": "OCR",
     "ocr_exact": "OCR exact match",
+    "ocr_match": "OCR match, ignoring case",
     "rerank_prob": "Reranker prob",
     "white_border_share": "White border share",
     "seconds": "Seconds",
