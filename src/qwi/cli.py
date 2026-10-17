@@ -507,6 +507,25 @@ def eval_compare(
     typer.echo(f"report {path}")
 
 
+@eval_app.command("calibrate")
+def eval_calibrate(
+    session: Annotated[str, typer.Argument(help="A judged best-of-N session folder, or its name.")],
+) -> None:
+    """Score each reranker instruction's top picks against the human's; write report.md (§5.4)."""
+    try:
+        report, path = bestof.write_calibration(sessions.session_dir(session))
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    for r in report.instructions:
+        typer.echo(
+            f"{r.label}: top-1 = best {r.agreement}/{report.items}, "
+            f"top-1 acceptable {r.top_acceptable}/{report.with_acceptable}"
+        )
+    typer.echo(f"no reranker (base seed): top-1 = best {report.base_seed_agreement}/{report.items}")
+    typer.echo(f"instruction: {report.winner}; --min-score {report.min_score:g}")
+    typer.echo(f"report {path}")
+
+
 @eval_app.command("review")
 def eval_review(
     session: Annotated[str, typer.Argument(help="Session folder, or its name in eval/sessions.")],

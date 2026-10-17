@@ -11,8 +11,9 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 from typer.testing import CliRunner
 
-from qwi import bestof, cli, paths, sessions
+from qwi import bestof, cli, evaluation, paths, sessions
 from qwi.bestof import BestOfJudgment
+from qwi.config import DEFAULTS
 from qwi.errors import SessionError
 from qwi.evaluation import load_prompts
 
@@ -42,8 +43,9 @@ def bo4(name: str = "bo4", seeds: dict[str, tuple[int, ...]] | None = None) -> P
                     "prompt": p.prompt,
                     "tags": list(p.tags),
                     "image": image,
-                    "rerank_margin": seed / 1000,
+                    "rerank_margin": seed / 1000,  # the task instruction always picks 2003
                     "rerank_prob": 0.9,
+                    "rerank_instruction": DEFAULTS.rerank_instruction,
                     "seconds": {"generate": 120.0},
                     "peak_gb": {"generate": 14.0},
                     "swap_gb": 0.0,
@@ -328,3 +330,164 @@ def test_cli_review_launches_the_best_of_page(
     result = runner.invoke(cli.app, ["eval", "review", session.name])
     assert result.exit_code == 0, result.output
     assert calls[0][4] == APP
+
+
+# --- Calibration (`qwi eval calibrate`) ----------------------------------------------------
+
+
+def judge_all(
+    session: Path,
+    best_seed: int = 2000,
+    ok_seeds: tuple[int, ...] = (2000, 2001),
+    none_ok: tuple[str, ...] = (),
+) -> None:
+    """Judge every prompt: `best_seed` is best, `ok_seeds` acceptable (none for `none_ok`)."""
+    for item in bestof.open_session(session).items:
+        oks = () if item.prompt_id in none_ok else ok_seeds
+        marks = {
+            n: "yes" if s in oks else "no" for n, s in zip(item.candidates, item.seeds, strict=True)
+        }
+        best = item.seeds.index(best_seed) + 1
+        bestof.save_judgment(session, item, BestOfJudgment(marks, best, ""))
+
+
+def rescored(label: str, margin: Any, prob: Any = None, name: str = "2026-10-17_bo4") -> None:
+    """A `rerank_<label>.jsonl` with margin(prompt_id, seed) and prob(prompt_id, seed)."""
+    rows = evaluation.read_rows(paths.eval_results_dir() / name / "results.jsonl")
+    evaluation.write_rows(
+        paths.eval_results_dir() / name / f"rerank_{label}.jsonl",
+        [
+            {
+                "id": r["id"],
+                "seed": r["seed"],
+                "image": r["image"],
+                "label": label,
+                "instruction": evaluation.RERANK_PRESETS.get(label, f"{label} text"),
+                "rerank_margin": margin(r["id"], r["seed"]),
+                "rerank_prob": (prob or (lambda i, s: 0.8))(r["id"], r["seed"]),
+                "rerank_resized": False,
+            }
+            for r in rows
+        ],
+    )
+
+
+def test_calibrate_refuses_until_every_prompt_is_judged(session: Path) -> None:
+    first = bestof.open_session(session).items[0]
+    bestof.save_judgment(session, first, complete(first))
+    with pytest.raises(SessionError, match="11 prompts are not judged yet"):
+        bestof.calibrate(session)
+
+
+def test_calibrate_scores_each_instruction_against_the_human(session: Path) -> None:
+    judge_all(session, best_seed=2000, ok_seeds=(2000, 2001))
+    rescored("generic", lambda i, s: -s)  # generic prefers the lowest seed: 2000
+    c = bestof.calibrate(session)
+    task, generic = c.instructions
+    assert (task.label, task.instruction) == ("task", DEFAULTS.rerank_instruction)
+    assert (generic.label, generic.instruction) == ("generic", DEFAULTS.rerank_generic_instruction)
+    # task always picks 2003 (never best, never acceptable); generic always picks 2000.
+    assert (task.agreement, task.top_acceptable) == (0, 0)
+    assert (generic.agreement, generic.top_acceptable) == (12, 12)
+    assert c.winner == "generic"
+    assert (c.items, c.candidates, c.with_acceptable) == (12, 4, 12)
+    assert (c.base_seed_agreement, c.base_seed_acceptable) == (12, 12)  # 2000 is the base seed
+    assert (c.chance_agreement, c.chance_acceptable) == (3.0, 6.0)  # 12/4; 12 x 2/4
+
+
+def test_a_margin_tie_goes_to_the_lowest_seed(session: Path) -> None:
+    judge_all(session, best_seed=2000)
+    rescored("flat", lambda i, s: 1.0)
+    flat = next(r for r in bestof.calibrate(session).instructions if r.label == "flat")
+    assert flat.agreement == 12
+
+
+def test_a_full_tie_keeps_the_default_instruction(session: Path) -> None:
+    judge_all(session, best_seed=2003, ok_seeds=(2003,))
+    rescored("generic", lambda i, s: s)  # the same picks as task
+    assert bestof.calibrate(session).winner == "task"
+
+
+def test_min_score_separates_prompts_with_no_acceptable_candidate(session: Path) -> None:
+    judge_all(session, best_seed=2003, ok_seeds=(2003,), none_ok=("count", "spatial"))
+    low = {"count": 0.3, "spatial": 0.42}
+    rescored("generic", lambda i, s: -s, lambda i, s: low.get(i, 0.7))  # worse picks: task wins
+    c = bestof.calibrate(session)
+    assert c.winner == "task"  # task agrees on the 10 prompts with an acceptable candidate
+    # Rewrite task's probs in results.jsonl the same way, so its picks carry them.
+    results = paths.eval_results_dir() / "2026-10-17_bo4" / "results.jsonl"
+    rows = evaluation.read_rows(results)
+    for r in rows:
+        r["rerank_prob"] = low.get(r["id"], 0.7)
+    evaluation.write_rows(results, rows)
+    c = bestof.calibrate(session)
+    assert c.min_score == 0.56  # midpoint of 0.42 and 0.7
+    assert "separates them" in c.min_score_reason
+
+
+def test_overlapping_probs_keep_the_default_min_score(session: Path) -> None:
+    judge_all(session, best_seed=2003, ok_seeds=(2003,), none_ok=("count",))
+    results = paths.eval_results_dir() / "2026-10-17_bo4" / "results.jsonl"
+    rows = evaluation.read_rows(results)
+    for r in rows:
+        r["rerank_prob"] = 0.95 if r["id"] == "count" else (0.4 if r["id"] == "style" else 0.8)
+    evaluation.write_rows(results, rows)
+    c = bestof.calibrate(session)
+    assert c.min_score == 0.5
+    assert c.min_score_reason.startswith("overlap: ")
+
+
+@pytest.mark.parametrize(
+    ("ok_seeds", "phrase"),
+    [((2000,), "every prompt had an acceptable candidate"), ((), "no prompt had an acceptable")],
+    ids=["all-acceptable", "none-acceptable"],
+)
+def test_nothing_to_separate_keeps_the_default_min_score(
+    session: Path, ok_seeds: tuple[int, ...], phrase: str
+) -> None:
+    judge_all(session, best_seed=2000, ok_seeds=ok_seeds)
+    c = bestof.calibrate(session)
+    assert c.min_score == 0.5
+    assert phrase in c.min_score_reason
+
+
+def test_calibrate_needs_scored_results(session: Path) -> None:
+    judge_all(session)
+    results = paths.eval_results_dir() / "2026-10-17_bo4" / "results.jsonl"
+    rows = evaluation.read_rows(results)
+    rows[0]["rerank_margin"] = None
+    evaluation.write_rows(results, rows)
+    with pytest.raises(SessionError, match="unscored rows"):
+        bestof.calibrate(session)
+
+
+def test_calibrate_refuses_a_paired_session() -> None:
+    paired = sessions.create(
+        [paired_variant("alpha")], [paired_variant("beta")], seed=7, day=date(2026, 10, 15)
+    )
+    with pytest.raises(SessionError, match="not a best-of-N session"):
+        bestof.calibrate(paired)
+
+
+def test_the_report_and_the_cli(session: Path) -> None:
+    judge_all(session, best_seed=2000, ok_seeds=(2000, 2001))
+    rescored("generic", lambda i, s: -s)
+    result = runner.invoke(cli.app, ["eval", "calibrate", session.name])
+    assert result.exit_code == 0, result.output
+    assert "task: top-1 = best 0/12, top-1 acceptable 0/12" in result.output
+    assert "generic: top-1 = best 12/12, top-1 acceptable 12/12" in result.output
+    assert "no reranker (base seed): top-1 = best 12/12" in result.output
+    assert "instruction: generic; --min-score 0.5" in result.output
+    report = (session / "report.md").read_text()
+    assert "## Instruction: **generic**" in report
+    assert "| `generic` | 12/12 (100%) | 12/12 (100%) |" in report
+    assert "| no reranker (base seed) | 12/12 (100%) | 12/12 (100%) |" in report
+    assert "| chance (random pick) | 3/12 (25%) | 6/12 (50%) |" in report
+    assert "## `--min-score`: **0.5**" in report
+    assert report.count("\n| `") >= 12 + 2  # per-prompt rows plus the instruction rows
+
+
+def test_cli_calibrate_reports_an_incomplete_session(session: Path) -> None:
+    result = runner.invoke(cli.app, ["eval", "calibrate", session.name])
+    assert result.exit_code == 1
+    assert "12 prompts are not judged yet" in result.output
