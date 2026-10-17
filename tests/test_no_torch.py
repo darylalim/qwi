@@ -7,6 +7,7 @@ M1, M2 and M3 each add a test here for their new stage (PLAN.md §6).
 import gc
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ from qwi.events import DenoiseStep, Event
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.generate import Generate
 from qwi.stages.guard import Guard
+from qwi.stages.ocr import Ocr, match
 from qwi.stages.rerank import Rerank
 from qwi.stages.rewrite import Rewrite
 
@@ -47,7 +49,7 @@ def test_model_libraries_import_without_torch() -> None:
     assert_torch_free()
 
 
-@pytest.mark.parametrize("role", ["rewrite", "rerank"])
+@pytest.mark.parametrize("role", ["rewrite", "rerank", "ocr"])
 def test_qwen3_vl_processor_preprocesses_an_image(role: str) -> None:
     from mlx_vlm import load
     from mlx_vlm.prompt_utils import apply_chat_template
@@ -109,6 +111,30 @@ def test_reranker_scores_images() -> None:
     # Finite yes/no margins at 768² with no resize (§5.3); the caption sanity test is separate.
     assert all(0.0 < s.prob < 1.0 and not s.resized for s in (match, other))
     assert match.margin > other.margin
+    assert_torch_free()
+
+
+def test_ocr_reads_rendered_text(tmp_path: Path) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    # Big, two lines: the 2B drops a 72 px "24" and title-cases capitals (§8 "OCR hint").
+    image = Image.new("RGB", (768, 768), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=128)
+    for y, line in ((280, "OPEN"), (480, "24 HOURS")):
+        draw.text((384, y), line, fill="black", font=font, anchor="mm")
+        left, _, right, _ = draw.textbbox((384, y), line, font=font, anchor="mm")
+        assert left >= 48  # the whole sign is in frame, with a margin
+        assert right <= 720
+    path = tmp_path / "sign.png"
+    image.save(path)
+    stage = Ocr(models.resolve("ocr"))
+    stage.load()
+    try:
+        text = stage(path)
+    finally:
+        stage.unload()
+    assert match(["OPEN 24 HOURS"], text) == {"OPEN 24 HOURS": True}, text
     assert_torch_free()
 
 
@@ -179,13 +205,18 @@ def test_pipeline_runs_end_to_end() -> None:
 def test_eval_runner_smoke() -> None:
     # Stage-batched eval on the real models; results go to the tmp eval set (conftest).
     request = EvalRequest(
-        "smoke", seeds=[0], only=["count", "isolated"], width=256, height=256, steps=2
+        "smoke", seeds=[0], only=["text-en", "count", "isolated"], width=256, height=256, steps=2
     )
     result = EvalRunner().run(request)
     assert result.status == "ok", result.error
-    assert [row["id"] for row in result.rows] == ["count", "isolated"]
+    assert [row["id"] for row in result.rows] == ["text-en", "count", "isolated"]
     assert all((result.images_dir / row["image"]).is_file() for row in result.rows)
-    assert 0.0 <= result.rows[1]["white_border_share"] <= 1.0
+    assert 0.0 <= result.rows[2]["white_border_share"] <= 1.0
+    # OCR read the text prompt's image only (2 steps at 256² draws no legible sign).
+    text, *others = result.rows
+    assert isinstance(text["ocr"], str)
+    assert set(text["ocr_exact"]) == {"THE DAILY GRIND"}
+    assert all(row["ocr"] is None for row in others)
     # Guard → rewrite → guard ran first (§5.4 stage order): each row records the rewrite.
     assert all(row["rewrite"] and row["guard"]["decision"] != "block" for row in result.rows)
     assert all("rewrite" in row["seconds"] for row in result.rows)

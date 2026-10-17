@@ -48,6 +48,26 @@ class EchoRewrite(FakeRewrite):
         return super().__call__(prompt)
 
 
+class FakeOcr:
+    """Reads the same text from every image; records the files it was given."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        self.seen: list[Path] = []
+        self.loaded = self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def __call__(self, image: Path) -> str:
+        assert image.is_file()  # the saved image, read back from disk
+        self.seen.append(image)
+        return self.reply
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+
 class Runner:
     def __init__(self) -> None:
         self.stages: list[FakeStage] = []
@@ -58,6 +78,8 @@ class Runner:
         self.roles: list[str] = []
         self.margins = [i / 10 for i in range(48)]
         self.rerankers: list[FakeRerank] = []
+        self.ocr_reply = "THE DAILY\nGRIND"
+        self.readers: list[FakeOcr] = []
         self.runner = EvalRunner(
             self._make,
             resolve=lambda role: Path("/w"),
@@ -65,7 +87,12 @@ class Runner:
             make_guard=self._guard,
             make_rewrite=self._rewrite,
             make_rerank=self._rerank,
+            make_ocr=self._ocr,
         )
+
+    def _ocr(self, model_path: Path) -> FakeOcr:
+        self.readers.append(FakeOcr(self.ocr_reply))
+        return self.readers[-1]
 
     def _rerank(self, model_path: Path, instruction: str) -> FakeRerank:
         self.rerankers.append(FakeRerank(self.margins, instruction))
@@ -151,7 +178,7 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
     assert len(checker.seen) == 24
     assert len(rewriter.seen) == 12
     assert (checker.unloaded, rewriter.unloaded) == (True, True)
-    assert r.roles == ["guard", "rewrite", "image", "rerank"]
+    assert r.roles == ["guard", "rewrite", "image", "ocr", "rerank"]
     assert result.blocked == []
 
     lines = (result.results_dir / "results.jsonl").read_text().splitlines()
@@ -173,20 +200,24 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
         "rewrite": "long",
         "guard_mode": "default",
     }
-    assert (first["rerank_margin"], first["rerank_prob"], first["ocr"]) == (0.0, 0.5, None)
+    assert (first["rerank_margin"], first["rerank_prob"]) == (0.0, 0.5)
+    assert (first["ocr"], first["ocr_exact"]) == ("THE DAILY\nGRIND", {"THE DAILY GRIND": True})
+    assert first["ocr_match"] == {"THE DAILY GRIND": True}
     assert first["rerank_instruction"] == DEFAULTS.rerank_instruction
     rewritten = f"A detailed picture: {first['prompt']}"
     assert (first["rewrite"], first["generated_prompt"]) == (rewritten, rewritten)
     assert first["rewrite_fallback_reason"] is None
     assert first["guard"]["decision"] == "allow"
     assert first["guard"]["rewrite"]["level"] == "Safe"
-    assert set(first["seconds"]) == {"guard", "rewrite", "generate", "rerank"}
-    assert set(first["peak_gb"]) == {"guard", "rewrite", "generate", "rerank"}
+    assert set(first["seconds"]) == {"guard", "rewrite", "generate", "ocr", "rerank"}
+    assert set(first["peak_gb"]) == {"guard", "rewrite", "generate", "ocr", "rerank"}
     assert first["swap_gb"] == 0.0
     assert first["preflight"]["decision"] == "ok"
     isolated = next(row for row in rows if row["id"] == "isolated")
     assert isolated["white_border_share"] == 0.0  # the fake stage draws black images
     assert isolated["white_border_pass"] is False
+    assert (isolated["ocr"], isolated["ocr_exact"], isolated["ocr_match"]) == (None, None, None)
+    assert "ocr" not in isolated["seconds"]
 
 
 def test_review_csv_has_one_row_per_image_and_check(r: Runner) -> None:
@@ -274,7 +305,7 @@ def test_a_failure_mid_run_keeps_rows_and_logs_the_error(r: Runner) -> None:
 def test_no_rewrite_generates_the_prompts_as_written(r: Runner) -> None:
     result = r.run(rewrite=False, only=["count"])
     assert r.rewriters == []
-    assert r.roles == ["guard", "image", "rerank"]
+    assert r.roles == ["guard", "image", "ocr", "rerank"]
     (row, _) = result.rows
     assert (row["rewrite"], row["rewrite_fallback_reason"]) == (None, None)
     assert row["generated_prompt"] == row["prompt"]
@@ -702,3 +733,52 @@ def test_cli_eval_guard_exits_0_when_nothing_is_blocked(monkeypatch: pytest.Monk
     result = CliRunner().invoke(cli.app, ["eval", "guard"])
     assert result.exit_code == 0
     assert result.output.splitlines()[-1] == "6/6 not blocked (--guard-mode default)"
+
+
+def test_ocr_reads_only_the_text_prompts_images_once_loaded(r: Runner) -> None:
+    result = r.run(only=["text-en", "text-multi", "count"])
+    (reader,) = r.readers  # one load, after generation and before the reranker
+    assert (reader.loaded, reader.unloaded) == (True, True)
+    text = [row for row in result.rows if "text" in row["tags"]]
+    assert [p.name for p in reader.seen] == [row["image"] for row in text]
+    multi = next(row for row in result.rows if row["id"] == "text-multi")
+    assert multi["ocr_exact"] == {"NORTHERN LIGHTS": False, "Live at Harbor Hall · March 14": False}
+    count = next(row for row in result.rows if row["id"] == "count")
+    assert (count["ocr"], count["ocr_exact"]) == (None, None)
+    assert evaluation.read_rows(result.results_dir / "results.jsonl") == result.rows
+
+
+def test_ocr_comes_between_generate_and_rerank(r: Runner) -> None:
+    started: list[str] = []
+    r.run(
+        lambda e: started.append(e.stage) if isinstance(e, StageStarted) else None, only=["text-zh"]
+    )
+    assert started[-3:] == ["generate", "ocr", "rerank"]
+
+
+def test_no_text_prompt_never_builds_the_ocr_model(r: Runner) -> None:
+    result = r.run(only=["count"])
+    assert result.status == "ok"
+    assert r.readers == []
+
+
+def test_a_generation_failure_skips_ocr(r: Runner) -> None:
+    r.fail_at = (1, RuntimeError("[metal::malloc] Resource limit (499000) exceeded."))
+    result = r.run(only=["text-en"])
+    assert (result.status, r.readers) == ("error", [])
+    assert result.rows[0]["ocr"] is None
+
+
+def test_cancel_during_ocr_keeps_the_rows_unread_and_skips_rerank(r: Runner) -> None:
+    cancel = threading.Event()
+
+    def on_event(event: Event) -> None:
+        if isinstance(event, StageStarted) and event.stage == "ocr":
+            cancel.set()
+
+    result = r.run(on_event, only=["text-en"], cancel=cancel)
+    assert result.status == "cancelled"
+    assert (r.readers[0].unloaded, r.rerankers) == (True, [])
+    saved = evaluation.read_rows(result.results_dir / "results.jsonl")
+    assert [row["ocr"] for row in saved] == [None, None]
+    assert not lock.is_held()

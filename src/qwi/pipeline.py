@@ -38,7 +38,7 @@ from qwi.events import (
 )
 from qwi.lock import RunLock, is_held
 from qwi.record import RunRecord
-from qwi.stages import guard, rerank
+from qwi.stages import guard, ocr, rerank
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate, Generate
 from qwi.stages.rewrite import Rewrite, Rewritten
@@ -116,10 +116,19 @@ class RerankStage(Protocol):
     def unload(self) -> None: ...
 
 
+class OcrStage(Protocol):
+    def load(self) -> None: ...
+
+    def __call__(self, image: Path) -> str: ...
+
+    def unload(self) -> None: ...
+
+
 StageFactory = Callable[[Path, Sequence[object], memory.SwapWatchdog], GenerateStage]
 GuardFactory = Callable[[Path], GuardStage]
 RewriteFactory = Callable[[Path, str], RewriteStage]
 RerankFactory = Callable[[Path, str], RerankStage]
+OcrFactory = Callable[[Path], OcrStage]
 
 
 def default_generate_stage(
@@ -138,6 +147,10 @@ def default_rewrite_stage(model_path: Path, style: str) -> RewriteStage:
 
 def default_rerank_stage(model_path: Path, instruction: str) -> RerankStage:
     return rerank.Rerank(model_path, instruction)
+
+
+def default_ocr_stage(model_path: Path) -> OcrStage:
+    return ocr.Ocr(model_path)
 
 
 def roles(request: GenerateRequest) -> list[str]:

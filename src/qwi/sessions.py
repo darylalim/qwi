@@ -467,7 +467,7 @@ def write_report(session: Path, noise_floor: int = 0) -> tuple[Report, Path]:
 
 SIDES = ("left", "right")
 REVIEW_SESSION_ENV = "QWI_REVIEW_SESSION"  # how `qwi eval review` tells the app which session
-HINT_KEYS = ("rewrite", "ocr", "ocr_exact", "rerank_prob", "white_border_share")
+HINT_KEYS = ("rewrite", "ocr", "ocr_exact", "ocr_match", "rerank_prob", "white_border_share")
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,9 @@ class Defaults:
     )
     # --min-score: below this best prob (the model leans "no"), warn that nothing clearly matched.
     rerank_min_score: float = 0.5
+    # Eval OCR hint for text-* prompts (PLAN.md §5.4 "Automated checks"): Qwen3-VL-2B, greedy.
+    ocr_prompt: str = "Transcribe all text visible in this image exactly. Output only the text."
+    ocr_max_tokens: int = 128  # the eval's longest text is two short lines
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached
     # and macOS swaps (PLAN.md §4, §8 2026-10-15 "Swap cause found").
     cache_limit_bytes: int = 2 * GiB

@@ -25,6 +25,11 @@ repo = "mlx-community/Qwen3-VL-Reranker-2B-8bit"
 revision = "e9cd8bbefa68882550b30cfe1c9905b882965888"
 license = "apache-2.0"
 
+[roles.ocr]  # eval only: the text-* OCR hint (§5.4); not the 8B, which writes the rewrites
+repo = "mlx-community/Qwen3-VL-2B-Instruct-8bit"
+revision = "b0338e0e843d8e1befe873d144b81fefdc47efa6"
+license = "apache-2.0"
+
 [roles.image]
 repo = "mlx-community/Qwen-Image-2.1-mflux-q4"
 revision = "746a58556820933a2df5c75887a2570f1ad200c0"
