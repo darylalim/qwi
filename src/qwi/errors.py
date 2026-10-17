@@ -124,6 +124,16 @@ class RunNotFound(QwiError):
         self.run_id = run_id
 
 
+class RunNotContinuable(QwiError):
+    """`qwi generate --continue-seeds` names a run that can't be continued (§5.3)."""
+
+    status = None
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        super().__init__(f"Can't continue run {run_id!r}: {reason}.")
+        self.run_id = run_id
+
+
 class EvalSetError(QwiError):
     """`eval/prompts.jsonl` is malformed, or `qwi eval --only` names an unknown prompt id."""
 

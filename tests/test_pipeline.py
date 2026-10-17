@@ -18,6 +18,7 @@ from qwi.errors import (
     InsufficientDisk,
     ModelUnavailable,
     PipelineBusy,
+    RunNotContinuable,
 )
 from qwi.events import (
     CandidateReady,
@@ -30,7 +31,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
-from qwi.pipeline import GenerateRequest, Pipeline
+from qwi.pipeline import GenerateRequest, Pipeline, continue_seeds
 from qwi.record import RunRecord
 from qwi.stages import guard, rerank, rewrite
 from qwi.stages.encode import PromptEmbeds
@@ -837,3 +838,115 @@ def test_allow_swap_raises_the_rerank_watchdog_limit(
     h.run(allow_swap=True)
     assert limits["rerank"] == DEFAULTS.allow_swap_limit_bytes
     assert limits["guard"] == DEFAULTS.swap_limit_bytes
+
+
+# --continue-seeds (§5.3 "Low-confidence warning")
+
+
+def last_run(h: Harness) -> Path:
+    return [e for e in h.events if isinstance(e, RunStarted)][-1].run_dir
+
+
+def test_continue_seeds_runs_more_seeds_from_the_source_prompt(h: Harness) -> None:
+    source = h.run(rewrite_style="long")
+    source_dir = last_run(h)
+    rec = h.pipeline.run(continue_seeds(source_dir, GenerateRequest("")), h._emit)
+    assert rec.status == "ok"
+    assert (rec.seeds, rec.continued_from) == ([103, 104, 105], source_dir.name)
+    assert [c["seed"] for c in rec.candidates] == [103, 104, 105]  # only its own candidates
+    assert [c["rank"] for c in rec.candidates] == [2, 1, 3]
+    assert len(h.rewriters) == 1  # no new rewrite
+    assert h.guards[-1].seen == ["a red apple"]  # the input guard still runs
+    assert h.stages[-1].encoded == ([REWRITE], "A-q4")
+    assert h.rerankers[-1].seen == [("a red apple", (64, 64))] * 3
+    assert (rec.user_prompt, rec.rewritten_prompt, rec.prompt_source) == (
+        "a red apple",
+        REWRITE,
+        "rewrite",
+    )
+    assert rec.rerank_query == source.rerank_query
+    assert set(rec.model_revisions) == {"guard", "image", "rerank"}
+    assert "rewrite" not in rec.timings_s
+    keys = ("width", "height", "n", "steps", "rewrite", "base_seed")
+    assert {k: rec.config[k] for k in keys} == {
+        "width": 64,
+        "height": 64,
+        "n": 3,
+        "steps": 2,
+        "rewrite": "long",
+        "base_seed": 103,
+    }
+    assert record.read(last_run(h)) == rec
+    assert record.read(source_dir) == source  # the source is never edited
+
+
+def test_continue_seeds_takes_n_and_the_caller_options(h: Harness) -> None:
+    h.run()
+    options = GenerateRequest("", guard_mode="strict", rerank_instruction="Apples?", min_score=0.8)
+    request = continue_seeds(last_run(h), options, n=2)
+    assert (request.prompt, request.n, request.seed, request.steps) == ("a red apple", 2, 103, 2)
+    assert (request.guard_mode, request.rerank_instruction, request.min_score) == (
+        "strict",
+        "Apples?",
+        0.8,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "prompt"),
+    [({"rewrite": False}, "a red apple"), ({}, REWRITE)],
+    ids=["no-rewrite", "rewrite"],
+)
+def test_continue_seeds_generates_from_what_the_source_generated_from(
+    h: Harness, overrides: dict[str, Any], prompt: str
+) -> None:
+    source = h.run(**overrides)
+    rec = h.pipeline.run(continue_seeds(last_run(h), GenerateRequest("")), h._emit)
+    assert h.stages[-1].encoded == h.stages[0].encoded == ([prompt], "A-q4")
+    assert rec.config["rewrite"] == source.config["rewrite"]
+
+
+def test_continue_seeds_after_a_fallback_keeps_the_user_prompt(h: Harness) -> None:
+    h.rewrite_reply = ""  # empty: the user's prompt is generated from
+    h.run()
+    rec = h.pipeline.run(continue_seeds(last_run(h), GenerateRequest("")), h._emit)
+    assert (rec.prompt_source, rec.rewrite_fallback_reason) == ("user", "empty")
+    assert h.stages[-1].encoded == (["a red apple"], "A-q4")
+
+
+def source_run(**fields: Any) -> Path:
+    run = paths.new_run_dir()
+    config = {"width": 64, "height": 64, "n": 2, "steps": 2, "encoder": "A-q4", "rewrite": "none"}
+    defaults: dict[str, Any] = {"seeds": [1, 2], "candidates": [{"index": 0}], "config": config}
+    record.write(RunRecord("a red apple", **(defaults | fields)), run)
+    return run
+
+
+def test_continue_seeds_accepts_a_cancelled_run_with_candidates() -> None:
+    request = continue_seeds(source_run(status="cancelled"), GenerateRequest(""))
+    assert (request.seed, request.n) == (3, 2)
+
+
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        ({"status": "running"}, "it is interrupted"),  # the lock is free: it died
+        ({"status": "interrupted"}, "it is interrupted"),
+        ({"status": "blocked", "candidates": []}, "no candidates"),
+        ({"status": "error", "candidates": []}, "no candidates"),
+        ({"status": "ok", "config": {"encoder": "B"}}, "encoder B, not A-q4"),
+    ],
+    ids=["dead-running", "interrupted", "blocked", "error-before-generate", "other-encoder"],
+)
+def test_continue_seeds_refuses_a_run_it_cannot_continue(
+    fields: dict[str, Any], reason: str
+) -> None:
+    run = source_run(**fields)
+    with pytest.raises(RunNotContinuable, match=reason):
+        continue_seeds(run, GenerateRequest(""))
+
+
+def test_continue_seeds_refuses_a_run_still_in_progress() -> None:
+    run = source_run(status="running")  # this process, holding the lock
+    with lock.RunLock(), pytest.raises(RunNotContinuable, match="it is running"):
+        continue_seeds(run, GenerateRequest(""))
