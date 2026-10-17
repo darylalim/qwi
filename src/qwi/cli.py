@@ -102,6 +102,19 @@ def cancel_on_signals(cancel: threading.Event) -> Generator[None]:
             signal.signal(sig, handler)
 
 
+def ranked_table(event: RerankDone) -> list[str]:
+    """Rank, seed, prob, margin and file per candidate, best first (§5.3 "Selection")."""
+    width = max(len("seed"), *(len(str(seed)) for seed in event.seeds))
+    lines = [f"  rank  {'seed':>{width}}  prob  margin  file"]
+    order = sorted(range(len(event.ranks)), key=lambda i: event.ranks[i])
+    for i in order:
+        lines.append(
+            f"  {event.ranks[i]:>4}  {event.seeds[i]:>{width}}  {event.probs[i]:.2f}"
+            f"  {event.margins[i]:>+6.2f}  {event.paths[i].name}"
+        )
+    return lines
+
+
 def _render(event: Event, show_rewrite: bool = False) -> None:
     match event:
         case RunStarted(run_dir, seeds):
@@ -125,10 +138,11 @@ def _render(event: Event, show_rewrite: bool = False) -> None:
             typer.echo(f"\r  candidate {index + 1} (seed {seed}): {path}")
         case StageFinished(stage, seconds, peak_gb):
             typer.echo(f"{stage}: {seconds:.1f} s, peak {peak_gb:.1f} GB")
-        case RerankDone(best_index, best_path, probs=probs, low_confidence=low, min_score=floor):
-            typer.echo(
-                f"best: candidate {best_index + 1} (prob {probs[best_index]:.2f}): {best_path}"
-            )
+        case RerankDone(best_index, best_path, low_confidence=low, min_score=floor):
+            for line in ranked_table(event):
+                typer.echo(line)
+            prob = event.probs[best_index]
+            typer.echo(f"best: candidate {best_index + 1} (prob {prob:.2f}): {best_path}")
             if low:
                 typer.echo(
                     f"low confidence: no candidate scored above {floor:.2f}; results are saved",
@@ -157,6 +171,17 @@ def generate(
     show_rewrite: Annotated[
         bool, typer.Option("--show-rewrite", help="Print the rewrite before generating.")
     ] = False,
+    min_score: Annotated[
+        float,
+        typer.Option(
+            min=0.0,
+            max=1.0,
+            help="Warn when the best candidate's reranker prob is below this.",
+        ),
+    ] = DEFAULTS.rerank_min_score,
+    rerank_instruction: Annotated[
+        str, typer.Option(help="The reranker's <Instruct> text (PLAN.md §5.3).")
+    ] = DEFAULTS.rerank_instruction,
     allow_swap: Annotated[
         bool,
         typer.Option(
@@ -167,6 +192,8 @@ def generate(
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="DEBUG logs.")] = False,
 ) -> None:
     """Generate N candidates for a prompt; writes images + run.json under $QWI_HOME/runs."""
+    if not rerank_instruction.strip():
+        raise typer.BadParameter("must not be empty", param_hint="--rerank-instruction")
     logs.app_log(verbose)
     request = GenerateRequest(
         prompt,
@@ -178,6 +205,8 @@ def generate(
         guard_mode=guard_mode.value,
         rewrite=not no_rewrite,
         rewrite_style=rewrite_style.value,
+        rerank_instruction=rerank_instruction,
+        min_score=min_score,
         allow_swap=allow_swap,
         verbose=verbose,
     )
