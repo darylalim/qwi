@@ -14,12 +14,22 @@ from PIL import Image
 from typer.testing import CliRunner
 
 from qwi import cli, evaluation, lock, logs, memory, paths, preflight
+from qwi.config import DEFAULTS, GiB
 from qwi.errors import EvalExists, EvalSetError
 from qwi.evaluation import EvalRequest, EvalRunner
-from qwi.events import CandidateReady, Event, GuardVerdict
+from qwi.events import CandidateReady, Event, GuardVerdict, StageStarted
 from qwi.stages import guard, rewrite
 
-from .test_pipeline import LIMIT, REWRITE, SAFE, FakeGuard, FakeRewrite, FakeStage, vm
+from .test_pipeline import (
+    LIMIT,
+    REWRITE,
+    SAFE,
+    FakeGuard,
+    FakeRerank,
+    FakeRewrite,
+    FakeStage,
+    vm,
+)
 
 DAY = date(2026, 10, 15)
 
@@ -46,13 +56,20 @@ class Runner:
         self.rewriters: list[EchoRewrite] = []
         self.guard_reply = SAFE
         self.roles: list[str] = []
+        self.margins = [i / 10 for i in range(48)]
+        self.rerankers: list[FakeRerank] = []
         self.runner = EvalRunner(
             self._make,
             resolve=lambda role: Path("/w"),
             startup=self.roles.extend,
             make_guard=self._guard,
             make_rewrite=self._rewrite,
+            make_rerank=self._rerank,
         )
+
+    def _rerank(self, model_path: Path, instruction: str) -> FakeRerank:
+        self.rerankers.append(FakeRerank(self.margins, instruction))
+        return self.rerankers[-1]
 
     def _guard(self, model_path: Path) -> FakeGuard:
         self.guards.append(FakeGuard(self.guard_reply))
@@ -134,7 +151,7 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
     assert len(checker.seen) == 24
     assert len(rewriter.seen) == 12
     assert (checker.unloaded, rewriter.unloaded) == (True, True)
-    assert r.roles == ["guard", "rewrite", "image"]
+    assert r.roles == ["guard", "rewrite", "image", "rerank"]
     assert result.blocked == []
 
     lines = (result.results_dir / "results.jsonl").read_text().splitlines()
@@ -156,14 +173,15 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
         "rewrite": "long",
         "guard_mode": "default",
     }
-    assert (first["rerank_margin"], first["ocr"]) == (None, None)
+    assert (first["rerank_margin"], first["rerank_prob"], first["ocr"]) == (0.0, 0.5, None)
+    assert first["rerank_instruction"] == DEFAULTS.rerank_instruction
     rewritten = f"A detailed picture: {first['prompt']}"
     assert (first["rewrite"], first["generated_prompt"]) == (rewritten, rewritten)
     assert first["rewrite_fallback_reason"] is None
     assert first["guard"]["decision"] == "allow"
     assert first["guard"]["rewrite"]["level"] == "Safe"
-    assert set(first["seconds"]) == {"guard", "rewrite", "generate"}
-    assert set(first["peak_gb"]) == {"guard", "rewrite", "generate"}
+    assert set(first["seconds"]) == {"guard", "rewrite", "generate", "rerank"}
+    assert set(first["peak_gb"]) == {"guard", "rewrite", "generate", "rerank"}
     assert first["swap_gb"] == 0.0
     assert first["preflight"]["decision"] == "ok"
     isolated = next(row for row in rows if row["id"] == "isolated")
@@ -256,13 +274,13 @@ def test_a_failure_mid_run_keeps_rows_and_logs_the_error(r: Runner) -> None:
 def test_no_rewrite_generates_the_prompts_as_written(r: Runner) -> None:
     result = r.run(rewrite=False, only=["count"])
     assert r.rewriters == []
-    assert r.roles == ["guard", "image"]
+    assert r.roles == ["guard", "image", "rerank"]
     (row, _) = result.rows
     assert (row["rewrite"], row["rewrite_fallback_reason"]) == (None, None)
     assert row["generated_prompt"] == row["prompt"]
     assert row["config"]["rewrite"] == "none"
     assert row["guard"]["rewrite"] is None
-    assert set(row["seconds"]) == {"guard", "generate"}
+    assert set(row["seconds"]) == {"guard", "generate", "rerank"}
     assert r.stages[0].encoded == ([row["prompt"]], "A-q4")
 
 
@@ -399,6 +417,182 @@ def test_cli_passes_the_rewrite_and_guard_flags(monkeypatch: pytest.MonkeyPatch)
         (True, "long", "default"),
         (False, "long", "loose"),
     ]
+
+
+# --- Rerank pass and rescore (§5.4 "Score once, compare offline") ---------------------------
+
+
+def test_every_image_is_scored_against_its_eval_prompt(r: Runner) -> None:
+    result = r.run(only=["count", "isolated"])
+    (reranker,) = r.rerankers  # one load for the whole run, after generation
+    assert (reranker.loaded, reranker.unloaded) == (True, True)
+    prompts = {p.id: p.prompt for p in evaluation.load_prompts()}
+    # The eval prompt, not the rewrite (§5.3 "Inputs"); every image, in row order, from disk.
+    assert reranker.seen == [(prompts[row["id"]], (64, 64)) for row in result.rows]
+    assert [row["rerank_margin"] for row in result.rows] == [0.0, 0.1, 0.2, 0.3]
+    assert [row["rerank_resized"] for row in result.rows] == [False] * 4
+    # results.jsonl is rewritten with the scores, and nothing is left behind.
+    saved = evaluation.read_rows(result.results_dir / "results.jsonl")
+    assert saved == result.rows
+    assert not (result.results_dir / "results.jsonl.tmp").exists()
+
+
+def test_the_rerank_instruction_reaches_the_stage_and_the_rows(r: Runner) -> None:
+    result = r.run(only=["count"], rerank_instruction="Is it apples?")
+    assert r.rerankers[0].instruction == "Is it apples?"
+    assert {row["rerank_instruction"] for row in result.rows} == {"Is it apples?"}
+
+
+def test_a_generation_failure_leaves_every_row_unscored(r: Runner) -> None:
+    r.fail_at = (1, RuntimeError("[metal::malloc] Resource limit (499000) exceeded."))
+    result = r.run(only=["count"])
+    assert (result.status, len(result.rows)) == ("error", 1)
+    assert r.rerankers == []
+    assert result.rows[0]["rerank_margin"] is None
+
+
+def test_cancel_during_rerank_keeps_the_rows_unscored_on_disk(r: Runner) -> None:
+    cancel = threading.Event()
+
+    def on_event(event: Event) -> None:
+        if isinstance(event, StageStarted) and event.stage == "rerank":
+            cancel.set()
+
+    result = r.run(on_event, only=["count"], cancel=cancel)
+    assert result.status == "cancelled"
+    assert r.rerankers[0].unloaded
+    saved = evaluation.read_rows(result.results_dir / "results.jsonl")
+    assert [row["rerank_margin"] for row in saved] == [None, None]
+    assert not lock.is_held()
+
+
+def test_swap_during_the_eval_rerank_is_an_error(
+    r: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = memory.SwapWatchdog
+    readings = iter([0, 3 * GiB])
+
+    def watchdog(stage: str, limit: int = DEFAULTS.swap_limit_bytes, *_: Any) -> Any:
+        if stage != "rerank":
+            return real(stage, limit, lambda: 0)
+        return real(stage, limit, lambda: next(readings, 3 * GiB))
+
+    monkeypatch.setattr(memory, "SwapWatchdog", watchdog)
+    result = r.run(only=["count"])
+    assert result.error is not None
+    assert (result.status, result.error["type"]) == ("error", "DeviceOutOfMemory")
+    assert len(r.rerankers[0].seen) == 1
+
+
+def _rescore(r: Runner, name: str, label: str = "generic", **kw: Any) -> Path:
+    return evaluation.rescore(
+        name,
+        label,
+        kw.pop("instruction", evaluation.RERANK_PRESETS.get(label, "custom text")),
+        make_rerank=r._rerank,
+        resolve=lambda role: Path("/w"),
+        startup=r.roles.extend,
+        **kw,
+    )
+
+
+def test_rescore_writes_its_own_file_and_leaves_results_alone(r: Runner) -> None:
+    result = r.run(only=["count", "isolated"])
+    before = (result.results_dir / "results.jsonl").read_bytes()
+    r.margins = [-1.0, 2.0, 0.5, 0.0]
+    r.roles.clear()
+    out = _rescore(r, result.name)
+    assert out == result.results_dir / "rerank_generic.jsonl"
+    assert (result.results_dir / "results.jsonl").read_bytes() == before
+    rows = evaluation.read_rows(out)
+    assert [(row["id"], row["seed"], row["rerank_margin"]) for row in rows] == [
+        ("count", 1000, -1.0),
+        ("count", 1001, 2.0),
+        ("isolated", 1000, 0.5),
+        ("isolated", 1001, 0.0),
+    ]
+    assert {row["instruction"] for row in rows} == {DEFAULTS.rerank_generic_instruction}
+    assert {row["label"] for row in rows} == {"generic"}
+    assert r.rerankers[-1].instruction == DEFAULTS.rerank_generic_instruction
+    assert (r.rerankers[-1].loaded, r.rerankers[-1].unloaded) == (True, True)
+    assert r.roles == ["rerank"]
+    assert not lock.is_held()
+
+
+def test_rescore_never_overwrites_a_label(r: Runner) -> None:
+    result = r.run(only=["count"])
+    _rescore(r, result.name)
+    with pytest.raises(EvalExists, match="rerank_generic"):
+        _rescore(r, result.name)
+
+
+@pytest.mark.parametrize("label", ["Generic", "a b", "-x", ""])
+def test_rescore_refuses_a_bad_label(r: Runner, label: str) -> None:
+    with pytest.raises(EvalSetError, match="--label"):
+        _rescore(r, "2026-10-15_baseline", label)
+
+
+def test_rescore_needs_results_and_their_images(r: Runner) -> None:
+    with pytest.raises(EvalSetError, match=r"no results\.jsonl"):
+        _rescore(r, "2026-10-15_nothing")
+    result = r.run(only=["count"])
+    (result.images_dir / "count_1001.png").unlink()
+    with pytest.raises(EvalSetError, match="1 images missing"):
+        _rescore(r, result.name)
+    assert not (result.results_dir / "rerank_generic.jsonl").exists()
+
+
+def test_cli_eval_passes_the_rerank_instruction(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[EvalRequest] = []
+
+    class FakeRunner:
+        def run(self, request: EvalRequest, on_event: Any) -> evaluation.EvalResult:
+            seen.append(request)
+            return evaluation.EvalResult("d_v", Path("/r"), Path("/i"), [{}])
+
+    monkeypatch.setattr(cli, "EvalRunner", FakeRunner)
+    assert runner.invoke(cli.app, ["eval", "--variant", "a"]).exit_code == 0
+    args = ["eval", "--variant", "b", "--rerank-instruction", "Is it apples?"]
+    assert runner.invoke(cli.app, args).exit_code == 0
+    assert (
+        runner.invoke(cli.app, ["eval", "--variant", "c", "--rerank-instruction", " "]).exit_code
+        == 2
+    )
+    assert [q.rerank_instruction for q in seen] == [DEFAULTS.rerank_instruction, "Is it apples?"]
+
+
+@pytest.mark.parametrize(
+    ("args", "instruction"),
+    [
+        (["--label", "generic"], DEFAULTS.rerank_generic_instruction),
+        (["--label", "task"], DEFAULTS.rerank_instruction),
+        (["--label", "mine", "--rerank-instruction", "Is it apples?"], "Is it apples?"),
+    ],
+    ids=["generic", "task", "custom"],
+)
+def test_cli_rescore_picks_the_instruction(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], instruction: str
+) -> None:
+    seen: list[tuple[str, str, str]] = []
+
+    def fake(name: str, label: str, text: str, **_: Any) -> Path:
+        seen.append((name, label, text))
+        return Path(f"/r/{name}/rerank_{label}.jsonl")
+
+    monkeypatch.setattr(cli, "rescore", fake)
+    result = runner.invoke(cli.app, ["eval", "rescore", "2026-10-17_bo4", *args])
+    assert result.exit_code == 0, result.output
+    assert seen == [("2026-10-17_bo4", args[1], instruction)]
+    assert f"ok: /r/2026-10-17_bo4/rerank_{args[1]}.jsonl" in result.output
+
+
+def test_cli_rescore_needs_an_instruction_for_an_unknown_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "rescore", lambda *a, **k: pytest.fail("must not run"))
+    result = runner.invoke(cli.app, ["eval", "rescore", "x", "--label", "mine"])
+    assert result.exit_code == 2
+    assert "no preset 'mine'" in plain(result.output)
 
 
 # --- Guard false-positive set (§5.4) -------------------------------------------------------

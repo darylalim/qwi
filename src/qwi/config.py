@@ -31,6 +31,10 @@ class Defaults:
         "Given an image-generation request, judge whether the image faithfully depicts "
         "everything the request asks for."
     )
+    # Upstream's generic instruction (the model card's default): the calibration compares the two.
+    rerank_generic_instruction: str = (
+        "Given a search query, retrieve relevant candidates that answer the query."
+    )
     # --min-score: below this best prob (the model leans "no"), warn that nothing clearly matched.
     rerank_min_score: float = 0.5
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached

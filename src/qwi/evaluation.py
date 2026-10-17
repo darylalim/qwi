@@ -2,17 +2,20 @@
 
 Stage-batched, not one pipeline per prompt: the runner holds the lock once and runs guard (all
 prompts) → rewrite (all) → guard on the rewrites (all) → encode (all) → generate (prompts x
-seeds), loading each model once (§5.4 stage order). Each seed is its own sample (no best-of-N).
-A prompt the guard blocks gets no images; the result lists it. Images go to
-`$QWI_HOME/eval/<date>_<variant>/`; `results.jsonl` (one row per image, appended as each image is
-saved) and `review.csv` go to the committed `eval/results/<date>_<variant>/`.
+seeds) → rerank (all images), loading each model once (§5.4 stage order). Each seed is its own
+sample (no best-of-N). A prompt the guard blocks gets no images; the result lists it. Images go
+to `$QWI_HOME/eval/<date>_<variant>/`; `results.jsonl` (one row per image, appended as each image
+is saved, rewritten once with the reranker scores) and `review.csv` go to the committed
+`eval/results/<date>_<variant>/`.
 
-M3 fills the reranker and OCR columns.
+`rescore()` scores saved images under another reranker instruction into `rerank_<label>.jsonl`
+beside them, without regenerating (§5.4 "Score once, compare offline"). OCR is still to come.
 """
 
 import csv
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -21,6 +24,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from PIL import Image as PILImage
 from PIL.Image import Image
 
 from qwi import errors, logs, memory, models, paths, preflight, storage
@@ -38,20 +42,29 @@ from qwi.lock import RunLock
 from qwi.pipeline import (
     ENCODER,
     GuardFactory,
+    RerankFactory,
+    RerankStage,
     RewriteFactory,
     RewriteStage,
     StageFactory,
     default_generate_stage,
     default_guard_stage,
+    default_rerank_stage,
     default_rewrite_stage,
     ignore_event,
 )
-from qwi.stages import guard
+from qwi.stages import guard, rerank
 
 ISOLATED_WHITE = 235  # all channels ≥ this counts as near-white (§5.4 automated checks)
 ISOLATED_BORDER = 0.10  # outer 10% of each side
 ISOLATED_MIN_SHARE = 0.9
 REVIEW_COLUMNS = ["item", "prompt_id", "seed", "image", "check", "result", "notes"]
+# `qwi eval rescore --label`: instructions the calibration compares (§5.4 "Best-of-4 calibration").
+RERANK_PRESETS = {
+    "task": DEFAULTS.rerank_instruction,
+    "generic": DEFAULTS.rerank_generic_instruction,
+}
+LABEL = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,7 @@ class EvalRequest:
     guard_mode: str = DEFAULTS.guard_mode
     rewrite: bool = True  # False: --no-rewrite, generate from the eval prompts as written
     rewrite_style: str = DEFAULTS.rewrite_style
+    rerank_instruction: str = DEFAULTS.rerank_instruction
     allow_swap: bool = False
     verbose: bool = False
     day: date = field(default_factory=date.today)
@@ -120,7 +134,7 @@ class EvalRequest:
 
     @property
     def roles(self) -> list[str]:
-        return ["guard", *(["rewrite"] if self.rewrite else []), "image"]
+        return ["guard", *(["rewrite"] if self.rewrite else []), "image", "rerank"]
 
 
 @dataclass
@@ -154,12 +168,14 @@ class EvalRunner:
         startup: Callable[[list[str]], None] = storage.startup,
         make_guard: GuardFactory = default_guard_stage,
         make_rewrite: RewriteFactory = default_rewrite_stage,
+        make_rerank: RerankFactory = default_rerank_stage,
     ) -> None:
         self._make_generate = make_generate
         self._resolve = resolve
         self._startup = startup
         self._make_guard = make_guard
         self._make_rewrite = make_rewrite
+        self._make_rerank = make_rerank
         self._stage = "startup"
 
     def run(
@@ -196,6 +212,7 @@ class EvalRunner:
                     allowed = [p for p in prompts if p.id not in result.blocked]
                     self._stage = "generate"
                     self._generate(request, allowed, prepared, result, on_event)
+                    self._rerank(request, result, on_event)
                 except (Exception, KeyboardInterrupt) as exc:
                     failure = errors.classify(exc, self._stage)
                     result.status = errors.status(failure) or "error"
@@ -390,6 +407,42 @@ class EvalRunner:
         finally:
             generator.unload()
 
+    def _rerank(
+        self, request: EvalRequest, result: EvalResult, on_event: Callable[[Event], None]
+    ) -> None:
+        """Score every saved image against its eval prompt, then rewrite `results.jsonl` once.
+
+        Runs only after generation finished: a failure or cancel leaves every row unscored.
+        """
+        if not result.rows:
+            return
+        self._check("rerank", request)
+        watchdog = memory.SwapWatchdog("rerank", preflight.swap_limit_bytes(request.allow_swap))
+        watchdog.start()
+        reranker = self._make_rerank(self._resolve("rerank"), request.rerank_instruction)
+        on_event(StageStarted("rerank"))
+        started = time.perf_counter()
+        try:
+            with memory.track_peak() as peak:
+                reranker.load()
+                scored = score_rows(
+                    reranker, result.rows, result.images_dir, request.cancel, watchdog
+                )
+        finally:
+            reranker.unload()
+        for row, (score, seconds) in zip(result.rows, scored, strict=True):
+            row |= {
+                "rerank_margin": round(score.margin, 4),
+                "rerank_prob": round(score.prob, 4),
+                "rerank_resized": score.resized,
+                "rerank_instruction": request.rerank_instruction,
+                "seconds": row["seconds"] | {"rerank": round(seconds, 2)},
+                "peak_gb": row["peak_gb"] | {"rerank": round(peak.gb, 2)},
+            }
+        write_rows(result.results_dir / "results.jsonl", result.rows)
+        on_event(StageFinished("rerank", time.perf_counter() - started, peak.gb))
+        logs.event(logging.INFO, "rerank", "rerank_scored", "scored", images=len(result.rows))
+
     @staticmethod
     def _row(
         request: EvalRequest,
@@ -428,6 +481,101 @@ class EvalRunner:
             row["white_border_share"] = round(share, 4)
             row["white_border_pass"] = share >= ISOLATED_MIN_SHARE
         return row
+
+
+def score_rows(
+    reranker: RerankStage,
+    rows: Sequence[dict[str, Any]],
+    images_dir: Path,
+    cancel: threading.Event,
+    watchdog: memory.SwapWatchdog,
+) -> list[tuple[rerank.Score, float]]:
+    """Each row's image, read back from disk (PNG is lossless), against its original prompt.
+
+    Returns (score, seconds) per row. Checks the swap watchdog and the cancel flag after each
+    image; the reranker must already be loaded.
+    """
+    scored: list[tuple[rerank.Score, float]] = []
+    for row in rows:
+        with PILImage.open(images_dir / row["image"]) as image:
+            image.load()
+            started = time.perf_counter()
+            score = reranker(row["prompt"], image)
+        scored.append((score, time.perf_counter() - started))
+        watchdog.check()
+        if cancel.is_set():
+            raise GenerationCancelled()
+    return scored
+
+
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def write_rows(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    """Atomic rewrite (tmp → replace), so a crash never leaves half a results file."""
+    tmp = path.with_name(path.name + ".tmp")
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def rescore(
+    name: str,
+    label: str,
+    instruction: str,
+    make_rerank: RerankFactory = default_rerank_stage,
+    resolve: Callable[[str], Path] = models.resolve,
+    startup: Callable[[list[str]], None] = storage.startup,
+    cancel: threading.Event | None = None,
+) -> Path:
+    """Score a saved variant's images under `instruction`; returns `rerank_<label>.jsonl`.
+
+    `results.jsonl` is never edited: each instruction gets its own file, one row per image.
+    """
+    if not LABEL.match(label):
+        raise EvalSetError(f"--label {label!r}: use lowercase letters, digits and dashes")
+    results_dir = paths.eval_results_dir() / name
+    images_dir = paths.eval_dir() / name
+    saved = results_dir / "results.jsonl"
+    if not saved.is_file():
+        raise EvalSetError(f"{results_dir} has no results.jsonl")
+    out = results_dir / f"rerank_{label}.jsonl"
+    if out.exists():
+        raise EvalExists(f"{out} exists; pick another --label")
+    rows = read_rows(saved)
+    missing = [row["image"] for row in rows if not (images_dir / row["image"]).is_file()]
+    if missing:
+        raise EvalSetError(f"{len(missing)} images missing from {images_dir}, e.g. {missing[0]}")
+    with RunLock():
+        startup(["rerank"])
+        preflight.check("rerank", preflight.STATIC_GB["rerank"])
+        watchdog = memory.SwapWatchdog("rerank")
+        watchdog.start()
+        reranker = make_rerank(resolve("rerank"), instruction)
+        try:
+            reranker.load()
+            scored = score_rows(reranker, rows, images_dir, cancel or threading.Event(), watchdog)
+        finally:
+            reranker.unload()
+    write_rows(
+        out,
+        [
+            {
+                "id": row["id"],
+                "seed": row["seed"],
+                "image": row["image"],
+                "label": label,
+                "instruction": instruction,
+                "rerank_margin": round(score.margin, 4),
+                "rerank_prob": round(score.prob, 4),
+                "rerank_resized": score.resized,
+            }
+            for row, (score, _) in zip(rows, scored, strict=True)
+        ],
+    )
+    logs.event(logging.INFO, "rerank", "rescored", label, results=name, images=len(rows))
+    return out
 
 
 def write_review(path: Path, prompts: list[EvalPrompt], rows: list[dict[str, Any]]) -> None:
