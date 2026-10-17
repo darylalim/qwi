@@ -299,15 +299,11 @@ def test_a_clear_failure_on_few_pairs_is_worse_not_inconclusive(ab: tuple[Path, 
 def test_extending_keeps_judgments_and_adds_only_new_pairs(ab: tuple[Path, Path]) -> None:
     old = new(ab)
     judge(old, first_checks(3, "pass", "fail", text=False))
+    # Named as the inconclusive verdict says: `<name>-ext` counts as `<name>`.
     a_ext = results("baseline-ext", seeds=(1002, 1003))
     b_ext = results("short-ext", seeds=(1002, 1003))
     with pytest.raises(SessionError, match="same two variants"):
-        sessions.create([a_ext], [b_ext], seed=8, day=DAY, extend=old)
-
-    # The extension's rows carry the original variant names.
-    for folder, name in ((a_ext, "baseline"), (b_ext, "short")):
-        path = folder / "results.jsonl"
-        path.write_text(path.read_text().replace(f'"{name}-ext"', f'"{name}"'))
+        sessions.create([b_ext], [a_ext], seed=8, day=DAY, extend=old)  # sides swapped
     session = sessions.create([a_ext], [b_ext], seed=8, day=DAY, extend=old)
     assert session.name == f"{old.name}_ext"
     manifest = json.loads((session / "manifest.json").read_text())
@@ -319,6 +315,33 @@ def test_extending_keeps_judgments_and_adds_only_new_pairs(ab: tuple[Path, Path]
     assert len(judged_rows) == sum(len(p.checks) for p in load_prompts()) * 2  # old ones kept
     with pytest.raises(SessionIncomplete):
         sessions.compare(session)  # the new pairs still need judging
+    judge(session)
+    assert sessions.compare(session).overall.ties > 0  # both folders load as one variant per side
+
+
+def test_an_extension_with_a_different_config_is_refused(ab: tuple[Path, Path]) -> None:
+    a, _ = ab
+    other = results("baseline-ext", seeds=(1002, 1003))
+    for folder, steps in ((a, 20), (other, 8)):
+        path = folder / "results.jsonl"
+        lines = path.read_text().splitlines()
+        rows = [json.loads(line) | {"config": {"steps": steps}} for line in lines]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    with pytest.raises(SessionError, match="one run config per side: steps"):
+        sessions.load_results([a, other])
+
+
+def test_an_extension_may_record_config_keys_an_older_run_lacks(ab: tuple[Path, Path]) -> None:
+    a, _ = ab  # no config at all, like an M1 row without `rewrite` / `guard_mode`
+    ext = results("baseline-ext", seeds=(1002, 1003))
+    path = ext / "results.jsonl"
+    rows = [
+        json.loads(line) | {"config": {"rewrite": "none", "guard_mode": "default"}}
+        for line in path.read_text().splitlines()
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    name, loaded = sessions.load_results([a, ext])
+    assert (name, len({seed for _, seed in loaded})) == ("baseline", 4)
 
 
 def test_sign_test_exact_values() -> None:
