@@ -153,7 +153,7 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
         "height": 64,
         "steps": 2,
         "encoder": "A-q4",
-        "rewrite": "short",
+        "rewrite": "long",
         "guard_mode": "default",
     }
     assert (first["rerank_margin"], first["ocr"]) == (None, None)
@@ -396,7 +396,7 @@ def test_cli_passes_the_rewrite_and_guard_flags(monkeypatch: pytest.MonkeyPatch)
     assert result.exit_code == 0
     assert "blocked  count (no images)" in result.stderr
     assert [(r.rewrite, r.rewrite_style, r.guard_mode) for r in seen] == [
-        (True, "short", "default"),
+        (True, "long", "default"),
         (False, "long", "loose"),
     ]
 

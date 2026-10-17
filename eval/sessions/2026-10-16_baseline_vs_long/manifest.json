@@ -1,0 +1,355 @@
+{
+  "version": 1,
+  "created": "2026-10-16",
+  "shuffle_seed": 862630034,
+  "extends": null,
+  "a": {
+    "name": "baseline",
+    "results": [
+      "2026-10-15_baseline"
+    ]
+  },
+  "b": {
+    "name": "long",
+    "results": [
+      "2026-10-16_long",
+      "2026-10-16_long-ext"
+    ]
+  },
+  "items": [
+    {
+      "item": "i001",
+      "prompt_id": "detailed",
+      "seed": 1001,
+      "tags": [
+        "rewrite-light"
+      ],
+      "checks": [
+        "every stated element present",
+        "the rewrite is nearly identical to the original"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i002",
+      "prompt_id": "spatial",
+      "seed": 1000,
+      "tags": [
+        "spatial",
+        "binding"
+      ],
+      "checks": [
+        "cube on sphere",
+        "cone on the left",
+        "colors not swapped"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i003",
+      "prompt_id": "isolated",
+      "seed": 1001,
+      "tags": [
+        "isolation"
+      ],
+      "checks": [
+        "single subject",
+        "clean plain white background with no scene or shadow",
+        "the rewrite keeps \"plain white background\""
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i004",
+      "prompt_id": "vague",
+      "seed": 1000,
+      "tags": [
+        "rewrite-heavy"
+      ],
+      "checks": [
+        "coherent scene",
+        "reads as \"cozy\"",
+        "the rewrite adds setting and lighting"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i005",
+      "prompt_id": "detailed",
+      "seed": 1000,
+      "tags": [
+        "rewrite-light"
+      ],
+      "checks": [
+        "every stated element present",
+        "the rewrite is nearly identical to the original"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i006",
+      "prompt_id": "exclusion",
+      "seed": 1000,
+      "tags": [
+        "negation"
+      ],
+      "checks": [
+        "no people",
+        "no cars",
+        "the rewrite rephrases this positively (\"deserted\", \"empty\")"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i007",
+      "prompt_id": "style",
+      "seed": 1001,
+      "tags": [
+        "style"
+      ],
+      "checks": [
+        "reads as ukiyo-e (flat color, outlines, woodgrain texture)",
+        "not photographic"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i008",
+      "prompt_id": "photo-person",
+      "seed": 1001,
+      "tags": [
+        "photoreal",
+        "anatomy"
+      ],
+      "checks": [
+        "plausible hands and fingers",
+        "natural face",
+        "golden-hour light"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i009",
+      "prompt_id": "text-en",
+      "seed": 1000,
+      "tags": [
+        "text"
+      ],
+      "checks": [
+        "sign text exactly `THE DAILY GRIND`",
+        "legible",
+        "on the sign"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i010",
+      "prompt_id": "vague",
+      "seed": 1001,
+      "tags": [
+        "rewrite-heavy"
+      ],
+      "checks": [
+        "coherent scene",
+        "reads as \"cozy\"",
+        "the rewrite adds setting and lighting"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i011",
+      "prompt_id": "text-zh",
+      "seed": 1001,
+      "tags": [
+        "text",
+        "multilingual"
+      ],
+      "checks": [
+        "sign reads exactly `清风茶舍`",
+        "the rewrite is in English with the Chinese kept verbatim"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i012",
+      "prompt_id": "text-multi",
+      "seed": 1000,
+      "tags": [
+        "text",
+        "layout"
+      ],
+      "checks": [
+        "both strings exact, including `·`",
+        "title at top, subtitle at bottom"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i013",
+      "prompt_id": "count",
+      "seed": 1000,
+      "tags": [
+        "counting"
+      ],
+      "checks": [
+        "exactly 5 apples",
+        "in a row",
+        "all red"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i014",
+      "prompt_id": "text-en",
+      "seed": 1001,
+      "tags": [
+        "text"
+      ],
+      "checks": [
+        "sign text exactly `THE DAILY GRIND`",
+        "legible",
+        "on the sign"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i015",
+      "prompt_id": "exclusion",
+      "seed": 1001,
+      "tags": [
+        "negation"
+      ],
+      "checks": [
+        "no people",
+        "no cars",
+        "the rewrite rephrases this positively (\"deserted\", \"empty\")"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i016",
+      "prompt_id": "style",
+      "seed": 1000,
+      "tags": [
+        "style"
+      ],
+      "checks": [
+        "reads as ukiyo-e (flat color, outlines, woodgrain texture)",
+        "not photographic"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i017",
+      "prompt_id": "spatial",
+      "seed": 1001,
+      "tags": [
+        "spatial",
+        "binding"
+      ],
+      "checks": [
+        "cube on sphere",
+        "cone on the left",
+        "colors not swapped"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i018",
+      "prompt_id": "count",
+      "seed": 1001,
+      "tags": [
+        "counting"
+      ],
+      "checks": [
+        "exactly 5 apples",
+        "in a row",
+        "all red"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i019",
+      "prompt_id": "binding",
+      "seed": 1000,
+      "tags": [
+        "binding"
+      ],
+      "checks": [
+        "the cat has the red scarf, the dog has the blue hat",
+        "no swaps or leaks"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i020",
+      "prompt_id": "text-zh",
+      "seed": 1000,
+      "tags": [
+        "text",
+        "multilingual"
+      ],
+      "checks": [
+        "sign reads exactly `清风茶舍`",
+        "the rewrite is in English with the Chinese kept verbatim"
+      ],
+      "left": "b"
+    },
+    {
+      "item": "i021",
+      "prompt_id": "isolated",
+      "seed": 1000,
+      "tags": [
+        "isolation"
+      ],
+      "checks": [
+        "single subject",
+        "clean plain white background with no scene or shadow",
+        "the rewrite keeps \"plain white background\""
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i022",
+      "prompt_id": "text-multi",
+      "seed": 1001,
+      "tags": [
+        "text",
+        "layout"
+      ],
+      "checks": [
+        "both strings exact, including `·`",
+        "title at top, subtitle at bottom"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i023",
+      "prompt_id": "binding",
+      "seed": 1001,
+      "tags": [
+        "binding"
+      ],
+      "checks": [
+        "the cat has the red scarf, the dog has the blue hat",
+        "no swaps or leaks"
+      ],
+      "left": "a"
+    },
+    {
+      "item": "i024",
+      "prompt_id": "photo-person",
+      "seed": 1000,
+      "tags": [
+        "photoreal",
+        "anatomy"
+      ],
+      "checks": [
+        "plausible hands and fingers",
+        "natural face",
+        "golden-hour light"
+      ],
+      "left": "b"
+    }
+  ]
+}

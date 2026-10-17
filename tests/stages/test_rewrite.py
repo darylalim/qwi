@@ -184,19 +184,19 @@ def test_stage_sends_system_and_user_with_the_plan_settings(fake_mlx_vlm: dict[s
 
     assert fake_mlx_vlm["path"] == "/weights/rewrite"
     assert fake_mlx_vlm["messages"] == [
-        {"role": "system", "content": system_prompt("short")},
+        {"role": "system", "content": system_prompt("long")},  # the default style (§8 2026-10-16)
         {"role": "user", "content": "a red apple"},
     ]
     assert fake_mlx_vlm["template_kwargs"] == {"num_images": 0}
     assert fake_mlx_vlm["prompt"] == "<formatted>"
     assert fake_mlx_vlm["kwargs"] == {
-        "max_tokens": 256,
+        "max_tokens": 1024,
         "temperature": 0.3,
         "top_p": 0.9,
         "seed": 0,
     }
     assert out == rewrite.Rewritten(
-        "A glossy red apple on an oak table.", "A glossy red apple on an oak table.", None, "short"
+        "A glossy red apple on an oak table.", "A glossy red apple on an oak table.", None, "long"
     )
 
 

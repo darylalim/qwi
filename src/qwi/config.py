@@ -16,8 +16,8 @@ class Defaults:
     guard_mode: str = "default"
     # The guard replies with two short lines; greedy decoding makes the verdict deterministic.
     guard_max_tokens: int = 64
-    # --rewrite-style (PLAN.md §5.1): "short" until the M2 three-way comparison picks a winner.
-    rewrite_style: str = "short"
+    # --rewrite-style (PLAN.md §5.1): "long" won the M2 three-way comparison (§8 2026-10-16).
+    rewrite_style: str = "long"
     # Low temperature keeps rewrites faithful; one fixed seed makes them reproducible (§5.1).
     rewrite_temperature: float = 0.3
     rewrite_top_p: float = 0.9
