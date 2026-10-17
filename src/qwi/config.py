@@ -25,6 +25,14 @@ class Defaults:
     # Per style: generation budget, and the word count above which the original prompt is kept.
     rewrite_max_tokens: dict[str, int] = field(default_factory=lambda: {"short": 256, "long": 1024})
     rewrite_max_words: dict[str, int] = field(default_factory=lambda: {"short": 200, "long": 700})
+    # Reranker (PLAN.md §5.3): the task-specific instruction (upstream's card: +1-5 points over
+    # the generic one); M3's best-of-4 calibration picks between them (§5.4).
+    rerank_instruction: str = (
+        "Given an image-generation request, judge whether the image faithfully depicts "
+        "everything the request asks for."
+    )
+    # --min-score: below this best prob (the model leans "no"), warn that nothing clearly matched.
+    rerank_min_score: float = 0.5
     # Caps MLX's buffer cache; without it the VAE decode leaves ≈ 15 GB of freed buffers cached
     # and macOS swaps (PLAN.md §4, §8 2026-10-15 "Swap cause found").
     cache_limit_bytes: int = 2 * GiB

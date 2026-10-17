@@ -4,8 +4,9 @@ One run at a time (`RunLock`). Each stage: pre-flight check → load → run →
 `run()` always returns the `RunRecord`; its `status` and `error` say how it ended, and the
 traceback of any error is in `run.log`. Only `PipelineBusy` is raised, because no run exists then.
 
-Stages: guard (input) → rewrite → guard (rewrite) → encode → generate (§1, §5.1, §5.2);
-`--no-rewrite` skips the rewrite and the second pass. M3 adds rerank after generate.
+Stages: guard (input) → rewrite → guard (rewrite) → encode → generate → rerank (§1, §5.1-5.3);
+`--no-rewrite` skips the rewrite and the second pass. Rerank runs only once every candidate is
+saved: after a failure or a cancel the kept candidates stay unranked (§5.11).
 """
 
 import logging
@@ -18,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from PIL import Image
+
 from qwi import errors, logs, memory, models, paths, preflight, record, storage
 from qwi.config import DEFAULTS
 from qwi.errors import GenerationCancelled, GuardBlocked
@@ -26,6 +29,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RerankDone,
     RewriteReady,
     RunStarted,
     StageFinished,
@@ -33,14 +37,14 @@ from qwi.events import (
 )
 from qwi.lock import RunLock
 from qwi.record import RunRecord
-from qwi.stages import guard
+from qwi.stages import guard, rerank
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate, Generate
 from qwi.stages.rewrite import Rewrite, Rewritten
 
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
-ROLES = ["guard", "rewrite", "image"]  # models a run can load; rerank joins in M3
+ROLES = ["guard", "rewrite", "image", "rerank"]  # models a run can load
 
 
 @dataclass
@@ -54,6 +58,8 @@ class GenerateRequest:
     guard_mode: str = DEFAULTS.guard_mode
     rewrite: bool = True  # False: --no-rewrite, generate from the prompt as given
     rewrite_style: str = DEFAULTS.rewrite_style
+    rerank_instruction: str = DEFAULTS.rerank_instruction
+    min_score: float = DEFAULTS.rerank_min_score
     allow_swap: bool = False
     verbose: bool = False
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -87,9 +93,18 @@ class GenerateStage(Protocol):
     def unload(self) -> None: ...
 
 
+class RerankStage(Protocol):
+    def load(self) -> None: ...
+
+    def __call__(self, query: str, image: Image.Image) -> rerank.Score: ...
+
+    def unload(self) -> None: ...
+
+
 StageFactory = Callable[[Path, Sequence[object], memory.SwapWatchdog], GenerateStage]
 GuardFactory = Callable[[Path], GuardStage]
 RewriteFactory = Callable[[Path, str], RewriteStage]
+RerankFactory = Callable[[Path, str], RerankStage]
 
 
 def default_generate_stage(
@@ -104,6 +119,10 @@ def default_guard_stage(model_path: Path) -> GuardStage:
 
 def default_rewrite_stage(model_path: Path, style: str) -> RewriteStage:
     return Rewrite(model_path, style)
+
+
+def default_rerank_stage(model_path: Path, instruction: str) -> RerankStage:
+    return rerank.Rerank(model_path, instruction)
 
 
 def roles(request: GenerateRequest) -> list[str]:
@@ -139,10 +158,12 @@ class Pipeline:
         startup: Callable[[list[str]], None] = storage.startup,
         make_guard: GuardFactory = default_guard_stage,
         make_rewrite: RewriteFactory = default_rewrite_stage,
+        make_rerank: RerankFactory = default_rerank_stage,
     ) -> None:
         self._make_generate = make_generate
         self._make_guard = make_guard
         self._make_rewrite = make_rewrite
+        self._make_rerank = make_rerank
         self._resolve = resolve
         self._startup = startup
         self._stage: str | None = None
@@ -181,7 +202,8 @@ class Pipeline:
                 self._stage = "startup"
                 self._startup(roles(request))  # disk, $QWI_HOME writable, models cached (§5.11)
                 prompt = self._prompt_stages(request, rec, run, on_event)
-                self._generate(request, prompt, rec, run, on_event)
+                images = self._generate(request, prompt, rec, run, on_event)
+                self._rerank(request, images, rec, run, on_event)
             except (Exception, KeyboardInterrupt) as exc:
                 failure = errors.classify(exc, self._stage or "setup")
                 if isinstance(failure, GenerationCancelled):
@@ -293,18 +315,26 @@ class Pipeline:
 
     @contextmanager
     def _measure(
-        self, rec: RunRecord, stage: str, on_event: Callable[[Event], None], **context: Any
-    ) -> Generator[None]:
-        """Time, peak memory and swap for a stage whose models load and run inside the block."""
+        self,
+        rec: RunRecord,
+        stage: str,
+        on_event: Callable[[Event], None],
+        swap_limit: int = DEFAULTS.swap_limit_bytes,
+        **context: Any,
+    ) -> Generator[memory.SwapWatchdog]:
+        """Time, peak memory and swap for a stage whose models load and run inside the block.
+
+        Yields the stage's watchdog, for stages that `check()` it between items.
+        """
         self._stage = stage
-        watchdog = memory.SwapWatchdog(stage)
+        watchdog = memory.SwapWatchdog(stage, swap_limit)
         watchdog.start()  # baseline before the model loads (§8 watchdog method)
         on_event(StageStarted(stage))
         logs.event(logging.INFO, stage, "stage_started", "loading", **context)
         started = time.perf_counter()
         try:
             with memory.track_peak() as peak:
-                yield
+                yield watchdog
         finally:
             rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
         self._finish_stage(rec, stage, started, peak.gb, on_event)
@@ -316,7 +346,8 @@ class Pipeline:
         rec: RunRecord,
         run: Path,
         on_event: Callable[[Event], None],
-    ) -> None:
+    ) -> list[Image.Image]:
+        """Stages 3-4: encode once, then one candidate per seed; returns the decoded images."""
         stage = self._stage = "generate"
         history = {k: rec.config[k] for k in HISTORY_KEYS}
         est = max(
@@ -333,6 +364,7 @@ class Pipeline:
         on_event(StageStarted("encode"))
         logs.event(logging.INFO, "encode", "stage_started", "loading", est_gb=round(est, 2))
         peaks: list[float] = []
+        images: list[Image.Image] = []  # kept in memory for the reranker (§5.3 "Inputs")
         candidates: Generator[Candidate] | None = None
         started: float | None = None  # set once denoising starts
         try:
@@ -360,6 +392,7 @@ class Pipeline:
             for index, candidate in enumerate(candidates):
                 path = run / paths.candidate_name(index, candidate.seed)
                 candidate.image.save(path)
+                images.append(candidate.image)
                 peaks.append(candidate.peak_gb)
                 rec.candidates.append(
                     {
@@ -390,6 +423,70 @@ class Pipeline:
             rec.swap_gb[stage] = round(watchdog.delta_bytes / memory.GB, 2)
             if started is not None:
                 self._finish_stage(rec, stage, started, max(peaks, default=0.0), on_event)
+        return images
+
+    def _rerank(
+        self,
+        request: GenerateRequest,
+        images: Sequence[Image.Image],
+        rec: RunRecord,
+        run: Path,
+        on_event: Callable[[Event], None],
+    ) -> None:
+        """Stage 5: score each image against the user's prompt, then link `best.png` (§5.3)."""
+        self._preflight(request, rec, run, "rerank", preflight.STATIC_GB["rerank"])
+        reranker = self._make_rerank(self._resolve("rerank"), request.rerank_instruction)
+        swap_limit = preflight.swap_limit_bytes(request.allow_swap)
+        scores: list[rerank.Score] = []
+        try:
+            with self._measure(rec, "rerank", on_event, swap_limit) as watchdog:
+                reranker.load()
+                for image in images:
+                    scores.append(reranker(rec.rerank_query, image))
+                    # No step hook here, and pre-flight only warns: check after each image.
+                    watchdog.check()
+                    if request.cancel.is_set():
+                        raise GenerationCancelled()
+        finally:
+            reranker.unload()
+
+        ranking = rerank.rank(scores, request.min_score)
+        for candidate, score, position in zip(rec.candidates, scores, ranking.ranks, strict=True):
+            candidate.update(
+                margin=round(score.margin, 4),
+                prob=round(score.prob, 4),
+                rank=position,
+                resized=score.resized,
+            )
+        rec.best_index = ranking.best_index
+        rec.rerank = {
+            "instruction": request.rerank_instruction,
+            "query": "user_prompt",
+            "min_score": request.min_score,
+            "low_confidence": ranking.low_confidence,
+        }
+        best = paths.link_best(run / rec.candidates[ranking.best_index]["path"])
+        record.write(rec, run)
+        on_event(
+            RerankDone(
+                ranking.best_index,
+                best,
+                [s.margin for s in scores],
+                [s.prob for s in scores],
+                ranking.ranks,
+                ranking.low_confidence,
+                request.min_score,
+            )
+        )
+        logs.event(
+            logging.WARNING if ranking.low_confidence else logging.INFO,
+            "rerank",
+            "rerank_done",
+            "low confidence: no candidate clearly matched" if ranking.low_confidence else "ranked",
+            best_index=ranking.best_index,
+            best_prob=round(scores[ranking.best_index].prob, 4),
+            min_score=request.min_score,
+        )
 
     @staticmethod
     def _finish_stage(

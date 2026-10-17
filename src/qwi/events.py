@@ -1,6 +1,6 @@
 """Typed pipeline events (PLAN.md §5.6): `Pipeline.run` emits them; the CLI and UI render them.
 
-M2 adds `GuardVerdict` and `RewriteReady`, M3 adds `RerankDone`.
+M2 added `GuardVerdict` and `RewriteReady`, M3 `RerankDone`.
 """
 
 from dataclasses import dataclass
@@ -55,6 +55,17 @@ class CandidateReady:
     path: Path
 
 
+@dataclass(frozen=True)
+class RerankDone:
+    best_index: int
+    best_path: Path  # best.png, linked to the winning candidate
+    margins: list[float]  # aligned with the run's seeds
+    probs: list[float]
+    ranks: list[int]  # 1 = best
+    low_confidence: bool  # the best prob is below min_score (§5.3)
+    min_score: float
+
+
 Event = (
     RunStarted
     | StageStarted
@@ -63,4 +74,5 @@ Event = (
     | RewriteReady
     | DenoiseStep
     | CandidateReady
+    | RerankDone
 )

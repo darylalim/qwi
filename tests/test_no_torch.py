@@ -18,6 +18,7 @@ from qwi.events import DenoiseStep, Event
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.stages.generate import Generate
 from qwi.stages.guard import Guard
+from qwi.stages.rerank import Rerank
 from qwi.stages.rewrite import Rewrite
 
 pytestmark = pytest.mark.slow
@@ -93,6 +94,24 @@ def test_rewriter_rewrites_and_keeps_quoted_text(style: str) -> None:
     assert_torch_free()
 
 
+def test_reranker_scores_images() -> None:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (768, 768), "white")
+    ImageDraw.Draw(image).rectangle((192, 192, 576, 576), fill="red")
+    stage = Rerank(models.resolve("rerank"))
+    stage.load()
+    try:
+        match = stage("a red square on a white background", image)
+        other = stage("a bowl of blue soup on a wooden table", image)
+    finally:
+        stage.unload()
+    # Finite yes/no margins at 768² with no resize (§5.3); the caption sanity test is separate.
+    assert all(0.0 < s.prob < 1.0 and not s.resized for s in (match, other))
+    assert match.margin > other.margin
+    assert_torch_free()
+
+
 def test_qwen_image_generates() -> None:
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
@@ -147,7 +166,10 @@ def test_pipeline_runs_end_to_end() -> None:
     steps = [(e.candidate, e.step, e.total) for e in events if isinstance(e, DenoiseStep)]
     assert steps == [(0, 1, 2), (0, 2, 2), (1, 1, 2), (1, 2, 2)]
     assert 0 < rec.peak_mem_gb["generate"] < 24
-    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate"}
+    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate", "rerank"}
+    assert rec.best_index is not None
+    assert all(0.0 < c["prob"] < 1.0 for c in rec.candidates)
+    assert 0 < rec.peak_mem_gb["rerank"] < 24
     assert rec.guard["decision"] == "allow"
     assert rec.rewritten_prompt
     assert 0 < rec.peak_mem_gb["rewrite"] < 24
