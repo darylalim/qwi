@@ -59,7 +59,9 @@ class CandidateReady:
 class RerankDone:
     best_index: int
     best_path: Path  # best.png, linked to the winning candidate
-    margins: list[float]  # aligned with the run's seeds
+    seeds: list[int]  # the lists below are all aligned with the run's seeds
+    paths: list[Path]  # each candidate's image
+    margins: list[float]
     probs: list[float]
     ranks: list[int]  # 1 = best
     low_confidence: bool  # the best prob is below min_score (§5.3)

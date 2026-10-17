@@ -1,4 +1,5 @@
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from qwi import cli, logs, paths, record, storage
+from qwi.config import DEFAULTS
 from qwi.errors import InsufficientDisk
 from qwi.events import (
     CandidateReady,
@@ -97,19 +99,72 @@ def test_generate_renders_events_and_exits_0(monkeypatch: pytest.MonkeyPatch) ->
     assert (request.prompt, request.n, request.seed, request.width) == ("a red apple", 2, 7, 768)
 
 
-def test_rerank_prints_the_best_candidate(capsys: pytest.CaptureFixture[str]) -> None:
-    best = Path("/runs/x/best.png")
-    cli._render(RerankDone(1, best, [0.5, 2.0], [0.62, 0.88], [2, 1], False, 0.5))
+def done(low: bool = False, margins: tuple[float, ...] = (0.5, 2.0, -1.0)) -> RerankDone:
+    probs = [round(1 / (1 + math.exp(-m)), 4) for m in margins]
+    ranks = [sorted(margins, reverse=True).index(m) + 1 for m in margins]
+    seeds = [7 + i for i in range(len(margins))]
+    paths_ = [Path(f"/runs/x/cand_{i}_seed{s}.png") for i, s in enumerate(seeds)]
+    best = ranks.index(1)
+    return RerankDone(
+        best, Path("/runs/x/best.png"), seeds, paths_, list(margins), probs, ranks, low, 0.5
+    )
+
+
+def test_ranked_table_lists_the_best_first() -> None:
+    assert cli.ranked_table(done()) == [
+        "  rank  seed  prob  margin  file",
+        "     1     8  0.88   +2.00  cand_1_seed8.png",
+        "     2     7  0.62   +0.50  cand_0_seed7.png",
+        "     3     9  0.27   -1.00  cand_2_seed9.png",
+    ]
+
+
+def test_ranked_table_widens_for_long_seeds() -> None:
+    event = done(margins=(1.0,))
+    event = RerankDone(0, event.best_path, [1234567], event.paths, [1.0], [0.73], [1], False, 0.5)
+    assert cli.ranked_table(event)[1] == "     1  1234567  0.73   +1.00  cand_0_seed7.png"
+
+
+def test_rerank_prints_the_table_then_the_best(capsys: pytest.CaptureFixture[str]) -> None:
+    cli._render(done())
     out = capsys.readouterr()
-    assert out.out == "best: candidate 2 (prob 0.88): /runs/x/best.png\n"
+    lines = out.out.splitlines()
+    assert lines[:4] == cli.ranked_table(done())
+    assert lines[4] == "best: candidate 2 (prob 0.88): /runs/x/best.png"
     assert out.err == ""
 
 
 def test_low_confidence_warns_on_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    cli._render(RerankDone(0, Path("/b.png"), [-0.5], [0.38], [1], True, 0.5))
+    cli._render(done(low=True, margins=(-0.5,)))
     out = capsys.readouterr()
-    assert out.out == "best: candidate 1 (prob 0.38): /b.png\n"
+    assert out.out.splitlines()[-1] == "best: candidate 1 (prob 0.38): /runs/x/best.png"
     assert out.err == "low confidence: no candidate scored above 0.50; results are saved\n"
+
+
+def test_rerank_flags_reach_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    assert runner.invoke(cli.app, ["generate", "p"]).exit_code == 0
+    args = ["generate", "p", "--min-score", "0.7", "--rerank-instruction", "Is it a cube?"]
+    assert runner.invoke(cli.app, args).exit_code == 0
+    first, second = fake.requests
+    assert (first.min_score, first.rerank_instruction) == (0.5, DEFAULTS.rerank_instruction)
+    assert (second.min_score, second.rerank_instruction) == (0.7, "Is it a cube?")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--min-score", "1.5"], ["--min-score", "-0.1"], ["--rerank-instruction", "  "]],
+    ids=["above-1", "below-0", "blank-instruction"],
+)
+def test_bad_rerank_flags_are_usage_errors(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    result = runner.invoke(cli.app, ["generate", "p", *args])
+    assert result.exit_code == 2
+    assert fake.requests == []
 
 
 def test_generate_exit_code_follows_the_record(monkeypatch: pytest.MonkeyPatch) -> None:

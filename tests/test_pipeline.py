@@ -746,6 +746,8 @@ def test_rerank_records_scores_and_links_best(h: Harness) -> None:
     done = h.events[-1]
     assert isinstance(done, RerankDone)
     assert (done.best_index, done.best_path, done.ranks) == (1, best, [2, 1, 3])
+    assert done.seeds == [100, 101, 102]
+    assert done.paths == [run / c["path"] for c in rec.candidates]
     assert done.probs == pytest.approx([0.6225, 0.8808, 0.2689], abs=1e-4)
 
 

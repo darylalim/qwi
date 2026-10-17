@@ -471,6 +471,8 @@ class Pipeline:
             RerankDone(
                 ranking.best_index,
                 best,
+                [c["seed"] for c in rec.candidates],
+                [run / c["path"] for c in rec.candidates],
                 [s.margin for s in scores],
                 [s.prob for s in scores],
                 ranking.ranks,
