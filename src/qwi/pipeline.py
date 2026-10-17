@@ -286,9 +286,7 @@ class Pipeline:
     ) -> None:
         """The stage's memory check before anything loads, then a last chance to cancel."""
         self._stage = stage
-        rec.preflight[stage] = preflight.check(
-            stage, est, allow_swap=request.allow_swap
-        ).as_record()
+        rec.preflight[stage] = preflight.check(stage, est).as_record()
         record.write(rec, run)
         if request.cancel.is_set():
             raise GenerationCancelled()

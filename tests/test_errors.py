@@ -67,7 +67,6 @@ def test_qwi_errors_pass_through_classify() -> None:
         (errors.GuardBlocked("unsafe: violent"), "blocked", 2),
         (errors.PipelineBusy("2026-10-15T09:30:05"), None, 3),
         (errors.InsufficientMemory("generate", 30.0, 22.9), "error", 4),
-        (errors.SwapRisk("generate", 18.0, 12.0), "error", 4),
         (errors.DeviceOutOfMemory("generate", "swapped"), "error", 4),
         (errors.ModelUnavailable("image", "missing"), "error", 5),
         (errors.DiskFull(10**9), "error", 6),
@@ -86,7 +85,6 @@ def test_status_and_exit_code_follow_the_plan_table(
 def test_messages_carry_the_plan_actions() -> None:
     assert str(errors.GenerationCancelled(2, 4)) == "Cancelled after 2 of 4 candidates"
     assert str(errors.GenerationCancelled()) == "Cancelled"
-    assert "--allow-swap" in str(errors.SwapRisk("generate", 18.0, 12.0))
     assert "512²" in str(errors.InsufficientMemory("generate", 30.0, 22.9))
     assert "qwi models fetch image" in str(errors.ModelUnavailable("image", "missing"))
     assert "started 2026-10-15T09:30:05" in str(errors.PipelineBusy("2026-10-15T09:30:05"))
@@ -102,7 +100,7 @@ def test_keyboard_interrupt_is_cancelled() -> None:
         ("ok", None, 0),
         ("cancelled", None, 130),
         ("blocked", None, 2),
-        ("error", "SwapRisk", 4),
+        ("error", "InsufficientMemory", 4),
         ("error", "ModelUnavailable", 5),
         ("error", "ValueError", 1),
         ("interrupted", None, 1),

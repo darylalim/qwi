@@ -354,22 +354,13 @@ def test_ctrl_c_inside_the_stage_is_cancelled(h: Harness) -> None:
     assert (rec.status, len(rec.candidates)) == ("cancelled", 2)
 
 
-def test_swap_risk_is_refused_before_loading(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(memory, "vm_stat", lambda: vm(12 * 10**9))
-    rec = h.run(width=768, height=768)  # 17.8 GB estimate, ~9.9 GB available after headroom
-    assert rec.error is not None
-    assert rec.error["type"] == "SwapRisk"
-    assert h.stages == []
-    assert errors.exit_code_for(rec.status, rec.error["type"]) == 4
-
-
-def test_allow_swap_runs_and_records_the_decision(
+def test_swap_risk_runs_and_records_the_decision(
     h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(memory, "vm_stat", lambda: vm(12 * 10**9))
-    rec = h.run(width=768, height=768, allow_swap=True)
+    rec = h.run(width=768, height=768)  # 14.95 GB estimate, ~9.9 GB available after headroom
     assert rec.status == "ok"
-    assert rec.preflight["generate"]["decision"] == "swap_risk_allowed"
+    assert rec.preflight["generate"]["decision"] == "swap_risk"
 
 
 def test_swap_during_the_stage_is_recorded(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,10 +420,6 @@ def _tiny_gpu(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(preflight, "wired_limit_bytes", lambda: 8 * 10**9)
 
 
-def _low_ram(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(memory, "vm_stat", lambda: vm(12 * 10**9))
-
-
 def _disk_full_on_second_save(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     saves = iter([None])
     real_save = Image.Image.save
@@ -468,7 +455,6 @@ FAULTS = [
     ),
     ("resolve-model", _resolve_missing, "error", "ModelUnavailable", 5, 0, False),
     ("preflight-limit", _tiny_gpu, "error", "InsufficientMemory", 4, 0, False),
-    ("preflight-swap", _low_ram, "error", "SwapRisk", 4, 0, False),
     ("mlx-oom", _fail_at(1, RuntimeError(OOM)), "error", "DeviceOutOfMemory", 4, 1, True),
     (
         "swap-watchdog",
