@@ -16,7 +16,7 @@ from typing import Annotated
 
 import typer
 
-from qwi import errors, lock, logs, paths, record, sessions, storage
+from qwi import bestof, errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
 from qwi.evaluation import RERANK_PRESETS, EvalRequest, EvalRunner, rescore, run_guard_allow
@@ -452,14 +452,33 @@ def eval_rescore(
 
 @eval_app.command("session")
 def eval_session(
-    a: Annotated[list[str], typer.Option("--a", help="Variant A results (repeatable).")],
-    b: Annotated[list[str], typer.Option("--b", help="Variant B results (repeatable).")],
+    a: Annotated[
+        list[str] | None, typer.Option("--a", help="Variant A results (repeatable).")
+    ] = None,
+    b: Annotated[
+        list[str] | None, typer.Option("--b", help="Variant B results (repeatable).")
+    ] = None,
+    bo4: Annotated[
+        str | None,
+        typer.Option("--bo4", help="One variant's results: a best-of-N calibration session."),
+    ] = None,
     seed: Annotated[int | None, typer.Option(help="Shuffle seed (default: random).")] = None,
     extend: Annotated[
         str | None, typer.Option(help="Keep this session's judgments; add the new pairs.")
     ] = None,
 ) -> None:
-    """Create a blind paired session: anonymous ids, shuffled order, random sides (§5.4)."""
+    """Create a blind session: A vs B pairs (--a/--b), or best-of-N candidates (--bo4) (§5.4)."""
+    if bo4 is not None:
+        if a or b or extend:
+            raise typer.BadParameter("--bo4 takes no --a, --b or --extend", param_hint="--bo4")
+        try:
+            folder = bestof.create(sessions.results_dir(bo4), seed=seed)
+        except QwiError as exc:
+            raise _fail(exc) from exc
+        typer.echo(f"session {folder.name}: judge it with `qwi eval review {folder.name}`")
+        return
+    if not a or not b:
+        raise typer.BadParameter("give --a and --b, or --bo4", param_hint="--a/--b")
     try:
         folder = sessions.create(
             [sessions.results_dir(x) for x in a],
@@ -493,16 +512,22 @@ def eval_review(
     session: Annotated[str, typer.Argument(help="Session folder, or its name in eval/sessions.")],
     port: Annotated[int, typer.Option(help="Local port for the app.")] = DEFAULTS.review_port,
 ) -> None:
-    """Judge a session's pairs blind in the browser; each Save writes review.csv (§5.4)."""
+    """Judge a session blind in the browser; each Save writes review.csv (§5.4)."""
     folder = sessions.session_dir(session).resolve()
     try:
-        sessions.open_session(folder)  # fail here, not in the browser
+        # Open it here so a bad session fails now, not in the browser.
+        if sessions.load_manifest(folder).get("kind") == sessions.BESTOF_KIND:
+            bestof.open_session(folder)
+            page = "bestof_app.py"
+        else:
+            sessions.open_session(folder)
+            page = "review_app.py"
     except QwiError as exc:
         raise _fail(exc) from exc
     if find_spec("streamlit") is None:
         typer.echo("The review app needs the ui extra: uv sync --all-extras", err=True)
         raise typer.Exit(1)
-    app_path = Path(__file__).parent / "ui" / "review_app.py"
+    app_path = Path(__file__).parent / "ui" / page
     command = [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)]
     env = {**os.environ, sessions.REVIEW_SESSION_ENV: str(folder)}
     typer.echo(f"reviewing {folder.name} at http://localhost:{port} (Ctrl-C to stop)")

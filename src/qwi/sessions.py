@@ -33,6 +33,7 @@ TIME_RATIO = 1.15
 PEAK_LIMIT_GB = 24.0
 EXTEND_SEEDS = (1002, 1003)
 EXT_SUFFIX = "-ext"  # `<name>-ext` holds the extension seeds of variant `<name>`
+BESTOF_KIND = "bo4"  # manifest `kind` of a best-of-N calibration session (`qwi.bestof`)
 
 
 def results_dir(arg: str) -> Path:
@@ -45,7 +46,7 @@ def results_dir(arg: str) -> Path:
     return path
 
 
-def _stored(path: Path) -> str:
+def stored(path: Path) -> str:
     """A results folder as `manifest.json` keeps it: its name if it lives in `eval/results/`
     (committed, so no home directory in git and any checkout can compare), else the path."""
     if path.resolve().parent == paths.eval_results_dir().resolve():
@@ -149,7 +150,7 @@ def create(
     old_items: list[Item] = []
     judged: dict[tuple[str, str], list[str]] = {}
     if extend is not None:
-        old = _load_manifest(extend)
+        old = paired_manifest(extend)
         if (old["a"]["name"], old["b"]["name"]) != (name_a, name_b):
             raise SessionError("--extend needs the same two variants, on the same sides")
         old_items = [Item.from_dict(i) for i in old["items"]]
@@ -176,8 +177,8 @@ def create(
         "created": day.isoformat(),
         "shuffle_seed": seed,
         "extends": extend.name if extend else None,
-        "a": {"name": name_a, "results": [_stored(p) for p in a]},
-        "b": {"name": name_b, "results": [_stored(p) for p in b]},
+        "a": {"name": name_a, "results": [stored(p) for p in a]},
+        "b": {"name": name_b, "results": [stored(p) for p in b]},
         "items": [i.to_dict() for i in items],
     }
     (folder / "manifest.json").write_text(
@@ -187,11 +188,19 @@ def create(
     return folder
 
 
-def _load_manifest(session: Path) -> dict[str, Any]:
+def load_manifest(session: Path) -> dict[str, Any]:
     path = session / "manifest.json"
     if not path.is_file():
         raise SessionError(f"no manifest.json in {session}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def paired_manifest(session: Path) -> dict[str, Any]:
+    """A paired (A vs B) session's manifest; a best-of-N session is refused (`qwi.bestof`)."""
+    manifest = load_manifest(session)
+    if manifest.get("kind") == BESTOF_KIND:
+        raise SessionError(f"{session.name} is a best-of-N session, not an A vs B pair")
+    return manifest
 
 
 def _read_review(session: Path) -> list[dict[str, str]]:
@@ -266,7 +275,7 @@ class Report:
 
 def compare(session: Path, noise_floor: int = 0) -> Report:
     """Score a fully judged session and apply the §5.4 decision rule."""
-    manifest = _load_manifest(session)
+    manifest = paired_manifest(session)
     items = {i["item"]: Item.from_dict(i) for i in manifest["items"]}
     rows = _read_review(session)
     missing = [
@@ -496,7 +505,7 @@ class ReviewSession:
 
 def open_session(folder: Path) -> ReviewSession:
     """Items in their shuffled order, each side's image and hints. Variant names stay out."""
-    manifest = _load_manifest(folder)
+    manifest = paired_manifest(folder)
     items = [Item.from_dict(i) for i in manifest["items"]]
     by_variant: dict[str, dict[tuple[str, int], tuple[Path, dict[str, Any]]]] = {}
     for variant in ("a", "b"):
