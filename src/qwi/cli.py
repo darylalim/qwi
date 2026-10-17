@@ -19,7 +19,7 @@ import typer
 from qwi import errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
-from qwi.evaluation import EvalRequest, EvalRunner, run_guard_allow
+from qwi.evaluation import RERANK_PRESETS, EvalRequest, EvalRunner, rescore, run_guard_allow
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
@@ -348,6 +348,9 @@ def eval_run(
     rewrite_style: Annotated[
         RewriteStyle, typer.Option(help="Rewriter system prompt.")
     ] = REWRITE_STYLE,
+    rerank_instruction: Annotated[
+        str, typer.Option(help="The reranker's <Instruct> text for the scoring pass.")
+    ] = DEFAULTS.rerank_instruction,
     allow_swap: Annotated[
         bool,
         typer.Option(
@@ -359,12 +362,14 @@ def eval_run(
 ) -> None:
     """Generate the eval set (12 prompts x seeds) for one variant (§5.4 "Protocol").
 
-    Runs guard → rewrite → guard → encode → generate, each model loaded once.
+    Runs guard → rewrite → guard → encode → generate → rerank, each model loaded once.
     """
     if ctx.invoked_subcommand is not None:
         return
     if variant is None:
         raise typer.BadParameter("--variant is required", param_hint="--variant")
+    if not rerank_instruction.strip():
+        raise typer.BadParameter("must not be empty", param_hint="--rerank-instruction")
     logs.app_log(verbose)
     request = EvalRequest(
         variant,
@@ -376,6 +381,7 @@ def eval_run(
         guard_mode=guard_mode.value,
         rewrite=not no_rewrite,
         rewrite_style=rewrite_style.value,
+        rerank_instruction=rerank_instruction,
         allow_swap=allow_swap,
         verbose=verbose,
     )
@@ -415,6 +421,33 @@ def eval_guard(
     typer.echo(f"{len(rows) - len(failed)}/{len(rows)} not blocked (--guard-mode {guard_mode})")
     if failed:
         raise typer.Exit(1)
+
+
+@eval_app.command("rescore")
+def eval_rescore(
+    results: Annotated[str, typer.Argument(help="A results folder name, e.g. 2026-10-17_bo4.")],
+    label: Annotated[
+        str, typer.Option(help="Names the output: rerank_<label>.jsonl. Presets: task, generic.")
+    ],
+    rerank_instruction: Annotated[
+        str | None,
+        typer.Option(help="The <Instruct> text (default: the preset named by --label)."),
+    ] = None,
+) -> None:
+    """Re-score a variant's saved images under another reranker instruction (§5.4)."""
+    instruction = rerank_instruction or RERANK_PRESETS.get(label)
+    if instruction is None or not instruction.strip():
+        raise typer.BadParameter(
+            f"no preset {label!r}; pass --rerank-instruction", param_hint="--rerank-instruction"
+        )
+    logs.app_log()
+    cancel = threading.Event()
+    try:
+        with cancel_on_signals(cancel):
+            out = rescore(results, label, instruction, cancel=cancel)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"ok: {out}")
 
 
 @eval_app.command("session")

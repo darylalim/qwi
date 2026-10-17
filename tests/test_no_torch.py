@@ -189,4 +189,7 @@ def test_eval_runner_smoke() -> None:
     # Guard → rewrite → guard ran first (§5.4 stage order): each row records the rewrite.
     assert all(row["rewrite"] and row["guard"]["decision"] != "block" for row in result.rows)
     assert all("rewrite" in row["seconds"] for row in result.rows)
+    # Rerank ran last and scored every image (§5.4 stage order).
+    assert all(0.0 < row["rerank_prob"] < 1.0 for row in result.rows)
+    assert all(not row["rerank_resized"] for row in result.rows)  # 256² is a multiple of 32
     assert_torch_free()
