@@ -1,4 +1,4 @@
-"""`Pipeline.run` with a fake generate stage: lifecycle, events, cancel, failures, lock."""
+"""`Pipeline.run` with fake stages: lifecycle, events, cancel, failures, lock."""
 
 import errno
 import threading
@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from qwi import errors, lock, logs, memory, paths, preflight, record
+from qwi.config import DEFAULTS, GiB
 from qwi.errors import (
     DeviceOutOfMemory,
     GenerationCancelled,
@@ -23,6 +24,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RerankDone,
     RewriteReady,
     RunStarted,
     StageFinished,
@@ -30,7 +32,7 @@ from qwi.events import (
 )
 from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
-from qwi.stages import guard, rewrite
+from qwi.stages import guard, rerank, rewrite
 from qwi.stages.encode import PromptEmbeds
 from qwi.stages.generate import Candidate
 
@@ -124,6 +126,27 @@ class FakeRewrite:
         self.unloaded = True
 
 
+class FakeRerank:
+    """Returns the next margin from a fixed list, one per image, like the real stage's Score."""
+
+    def __init__(self, margins: Sequence[float], instruction: str) -> None:
+        self.margins = list(margins)
+        self.instruction = instruction
+        self.seen: list[tuple[str, tuple[int, int]]] = []
+        self.loaded = self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def __call__(self, query: str, image: Image.Image) -> rerank.Score:
+        self.seen.append((query, image.size))
+        margin = self.margins[len(self.seen) - 1]
+        return rerank.Score(margin, rerank.sigmoid(margin), False)
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+
 class Harness:
     def __init__(self) -> None:
         self.stages: list[FakeStage] = []
@@ -136,13 +159,20 @@ class Harness:
         self.guards: list[FakeGuard] = []
         self.rewrite_reply = REWRITE
         self.rewriters: list[FakeRewrite] = []
+        self.margins = [0.5, 2.0, -1.0, 1.0]  # candidate 1 wins
+        self.rerankers: list[FakeRerank] = []
         self.pipeline = Pipeline(
             self._make,
             resolve=self._resolve,
             startup=lambda r: self.startup(r),
             make_guard=self._make_guard,
             make_rewrite=self._make_rewrite,
+            make_rerank=self._make_rerank,
         )
+
+    def _make_rerank(self, model_path: Path, instruction: str) -> FakeRerank:
+        self.rerankers.append(FakeRerank(self.margins, instruction))
+        return self.rerankers[-1]
 
     def _make_rewrite(self, model_path: Path, style: str) -> FakeRewrite:
         self.rewriters.append(FakeRewrite(self.rewrite_reply, style))
@@ -216,10 +246,10 @@ def test_a_run_writes_candidates_and_a_final_record(h: Harness) -> None:
     }
     assert rec.preflight["generate"]["decision"] == "ok"
     assert rec.peak_mem_gb["generate"] == pytest.approx(14.0)
-    assert rec.swap_gb == {"guard": 0.0, "rewrite": 0.0, "generate": 0.0}
-    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate"}
-    assert set(rec.model_revisions) == {"guard", "rewrite", "image"}
-    assert h.resolved == ["guard", "rewrite", "image"]
+    assert rec.swap_gb == {"guard": 0.0, "rewrite": 0.0, "generate": 0.0, "rerank": 0.0}
+    assert set(rec.timings_s) == {"guard", "rewrite", "encode", "generate", "rerank"}
+    assert set(rec.model_revisions) == {"guard", "rewrite", "image", "rerank"}
+    assert h.resolved == ["guard", "rewrite", "image", "rerank"]
     assert (rec.rewritten_prompt, rec.rewrite_fallback_reason) == (REWRITE, None)
     assert (rec.prompt_source, rec.rerank_query) == ("rewrite", "a red apple")
     assert rec.guard["decision"] == "allow"
@@ -230,6 +260,8 @@ def test_a_run_writes_candidates_and_a_final_record(h: Harness) -> None:
     assert (h.rewriters[0].loaded, h.rewriters[0].unloaded) == (True, True)
     assert h.stages[0].loaded
     assert h.stages[0].unloaded
+    assert (h.rerankers[0].loaded, h.rerankers[0].unloaded) == (True, True)
+    assert rec.best_index == 1
 
 
 def test_events_arrive_in_order(h: Harness) -> None:
@@ -251,6 +283,9 @@ def test_events_arrive_in_order(h: Harness) -> None:
         *["DenoiseStep"] * 2,
         "CandidateReady",
         "StageFinished",
+        "StageStarted",
+        "StageFinished",
+        "RerankDone",
     ]
     steps = [e for e in h.events if isinstance(e, DenoiseStep)]
     assert [(s.candidate, s.step, s.total) for s in steps] == [
@@ -261,13 +296,14 @@ def test_events_arrive_in_order(h: Harness) -> None:
     ]
     assert isinstance(h.events[0], RunStarted)
     assert h.events[0].seeds == [100, 101]
-    stages = ["guard", "rewrite", "encode", "generate"]
+    stages = ["guard", "rewrite", "encode", "generate", "rerank"]
     assert [e.stage for e in h.events if isinstance(e, StageStarted)] == stages
     assert [e.stage for e in h.events if isinstance(e, StageFinished)] == stages
     ready = [e for e in h.events if isinstance(e, CandidateReady)]
     assert [(e.index, e.seed, e.path.name) for e in ready][1] == (1, 101, "cand_1_seed101.png")
-    assert isinstance(h.events[-1], StageFinished)
-    assert h.events[-1].peak_gb == pytest.approx(13.9)
+    (generated,) = [e for e in h.events if isinstance(e, StageFinished) and e.stage == "generate"]
+    assert generated.peak_gb == pytest.approx(13.9)
+    assert isinstance(h.events[-1], RerankDone)
 
 
 def test_random_base_seed_is_recorded(h: Harness) -> None:
@@ -384,7 +420,7 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
         held.append(lock.is_held()) if isinstance(event, StageStarted) else None
     )
     h.run()
-    assert held == [True] * 4  # guard, rewrite, encode and generate
+    assert held == [True] * 5  # guard, rewrite, encode, generate and rerank
     assert not lock.is_held()
 
 
@@ -612,8 +648,8 @@ def test_no_rewrite_skips_the_stage_and_the_second_pass(h: Harness) -> None:
     rec = h.run(rewrite=False)
     assert rec.status == "ok"
     assert h.rewriters == []
-    assert h.resolved == ["guard", "image"]
-    assert set(rec.model_revisions) == {"guard", "image"}
+    assert h.resolved == ["guard", "image", "rerank"]
+    assert set(rec.model_revisions) == {"guard", "image", "rerank"}
     assert rec.config["rewrite"] == "none"
     assert (rec.rewritten_prompt, rec.prompt_source, rec.guard["rewrite"]) == ("", "user", None)
     assert h.guards[0].seen == ["a red apple"]
@@ -685,3 +721,117 @@ def test_a_rewrite_failure_is_an_error_in_the_rewrite_stage(
     assert (rec.error["type"], rec.error["stage"]) == ("DeviceOutOfMemory", "rewrite")
     assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
     assert h.stages == []
+
+
+# --- Rerank (§5.3): score every candidate against the user's prompt, link best.png ----------
+
+
+def test_rerank_records_scores_and_links_best(h: Harness) -> None:
+    rec = h.run()
+    run = run_dir(rec)
+    assert [c["margin"] for c in rec.candidates] == [0.5, 2.0, -1.0]
+    assert [c["prob"] for c in rec.candidates] == [0.6225, 0.8808, 0.2689]
+    assert [c["rank"] for c in rec.candidates] == [2, 1, 3]
+    assert [c["resized"] for c in rec.candidates] == [False] * 3
+    assert rec.best_index == 1
+    assert rec.rerank == {
+        "instruction": DEFAULTS.rerank_instruction,
+        "query": "user_prompt",
+        "min_score": 0.5,
+        "low_confidence": False,
+    }
+    best = run / "best.png"
+    assert best.stat().st_ino == (run / "cand_1_seed101.png").stat().st_ino  # a hard link
+    assert rec.preflight["rerank"]["est_gb"] == preflight.STATIC_GB["rerank"]
+    done = h.events[-1]
+    assert isinstance(done, RerankDone)
+    assert (done.best_index, done.best_path, done.ranks) == (1, best, [2, 1, 3])
+    assert done.probs == pytest.approx([0.6225, 0.8808, 0.2689], abs=1e-4)
+
+
+def test_rerank_scores_the_user_prompt_and_the_images_in_memory(h: Harness) -> None:
+    h.run()
+    # The original prompt, not the rewrite (§5.3 "Inputs"); every decoded image, in seed order.
+    assert h.rerankers[0].seen == [("a red apple", (64, 64))] * 3
+
+
+def test_rerank_options_reach_the_stage_and_the_record(h: Harness) -> None:
+    rec = h.run(rerank_instruction="Is this an apple?", min_score=0.9)
+    assert h.rerankers[0].instruction == "Is this an apple?"
+    assert (rec.rerank["instruction"], rec.rerank["min_score"]) == ("Is this an apple?", 0.9)
+    assert rec.rerank["low_confidence"]  # the best prob, 0.88, is below 0.9
+
+
+def test_low_confidence_warns_but_keeps_the_results(h: Harness) -> None:
+    h.margins = [-2.0, -0.5, -1.0]
+    rec = h.run()
+    run = run_dir(rec)
+    assert (rec.status, rec.best_index, rec.rerank["low_confidence"]) == ("ok", 1, True)
+    assert (run / "best.png").is_file()
+    (line,) = [x for x in logs.read(run / "run.log", "warning") if x["event"] == "rerank_done"]
+    assert line["best_prob"] == pytest.approx(0.3775)
+    done = h.events[-1]
+    assert isinstance(done, RerankDone)
+    assert done.low_confidence
+
+
+def test_a_generation_failure_skips_rerank(h: Harness) -> None:
+    h.configure = lambda stage: setattr(stage, "fail_at", (2, ValueError("boom")))
+    rec = h.run()
+    run = run_dir(rec)
+    assert (rec.status, len(rec.candidates), rec.best_index) == ("error", 2, None)
+    assert h.rerankers == []  # never built: the kept candidates stay unranked (§5.11)
+    assert "rerank" not in rec.preflight
+    assert not (run / "best.png").exists()
+
+
+def test_cancel_during_rerank_leaves_the_run_unranked(h: Harness) -> None:
+    cancel = threading.Event()
+    h.on_event = lambda event: (
+        cancel.set() if isinstance(event, StageStarted) and event.stage == "rerank" else None
+    )
+    rec = h.run(cancel=cancel)
+    run = run_dir(rec)
+    assert (rec.status, len(rec.candidates), rec.best_index) == ("cancelled", 3, None)
+    assert len(h.rerankers[0].seen) == 1  # stopped after the first image
+    assert h.rerankers[0].unloaded
+    assert not (run / "best.png").exists()
+    assert not lock.is_held()
+
+
+def test_swap_during_rerank_stops_the_stage(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = memory.SwapWatchdog
+    readings = iter([0, 3 * GiB])  # rerank: the baseline, then 3 GiB swapped after image 1
+
+    def watchdog(stage: str, limit: int = DEFAULTS.swap_limit_bytes, *_: Any) -> Any:
+        if stage != "rerank":
+            return real(stage, limit, lambda: 0)
+        return real(stage, limit, lambda: next(readings, 3 * GiB))
+
+    monkeypatch.setattr(memory, "SwapWatchdog", watchdog)
+    rec = h.run()
+    assert rec.error is not None
+    assert (rec.status, rec.error["type"], rec.error["stage"]) == (
+        "error",
+        "DeviceOutOfMemory",
+        "rerank",
+    )
+    assert len(h.rerankers[0].seen) == 1
+    assert h.rerankers[0].unloaded
+    assert (rec.best_index, rec.swap_gb["rerank"]) == (None, 3.22)
+
+
+def test_allow_swap_raises_the_rerank_watchdog_limit(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits: dict[str, int] = {}
+    real = memory.SwapWatchdog
+
+    def watchdog(stage: str, limit: int = DEFAULTS.swap_limit_bytes, *_: Any) -> Any:
+        limits[stage] = limit
+        return real(stage, limit, lambda: 0)
+
+    monkeypatch.setattr(memory, "SwapWatchdog", watchdog)
+    h.run(allow_swap=True)
+    assert limits["rerank"] == DEFAULTS.allow_swap_limit_bytes
+    assert limits["guard"] == DEFAULTS.swap_limit_bytes

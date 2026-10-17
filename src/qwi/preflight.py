@@ -32,10 +32,10 @@ GENERATE_PEAKS_GB = ((0.065536, 12.15), (0.589824, 17.78), (4.194304, 37.92))
 # runs (§8 2026-10-15). M0b's 13.82 GB came from a bare generate call, not the pipeline path.
 EVICTED_SAVING_GB = 2.83
 
-# Peaks from the M0b smoke test, load + one short generation (§8 2026-10-15): guard 1.62 GiB
-# (1.74 GB); rewrite 5.59 GiB (6.0 GB) plus the guard, which stays loaded through it (§4).
-# Rerank: weights only (§4) until M3 measures it.
-STATIC_GB = {"guard": 1.74, "rewrite": 7.74, "rerank": 2.5}
+# Peaks from the M0b smoke test, load + one short generation or forward (§8 2026-10-15): guard
+# 1.62 GiB (1.74 GB); rewrite 5.59 GiB (6.0 GB) plus the guard, which stays loaded through it
+# (§4); rerank 3.54 GiB (3.8 GB) for one 768² image.
+STATIC_GB = {"guard": 1.74, "rewrite": 7.74, "rerank": 3.8}
 
 
 def generate_gb(width: int, height: int, encoder_resident: bool = True) -> float:

@@ -25,6 +25,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    RerankDone,
     RewriteReady,
     RunStarted,
     StageFinished,
@@ -124,6 +125,15 @@ def _render(event: Event, show_rewrite: bool = False) -> None:
             typer.echo(f"\r  candidate {index + 1} (seed {seed}): {path}")
         case StageFinished(stage, seconds, peak_gb):
             typer.echo(f"{stage}: {seconds:.1f} s, peak {peak_gb:.1f} GB")
+        case RerankDone(best_index, best_path, probs=probs, low_confidence=low, min_score=floor):
+            typer.echo(
+                f"best: candidate {best_index + 1} (prob {probs[best_index]:.2f}): {best_path}"
+            )
+            if low:
+                typer.echo(
+                    f"low confidence: no candidate scored above {floor:.2f}; results are saved",
+                    err=True,
+                )
 
 
 @app.command()

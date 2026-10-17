@@ -11,6 +11,7 @@ from qwi.events import (
     CandidateReady,
     DenoiseStep,
     GuardVerdict,
+    RerankDone,
     RewriteReady,
     RunStarted,
     StageFinished,
@@ -94,6 +95,21 @@ def test_generate_renders_events_and_exits_0(monkeypatch: pytest.MonkeyPatch) ->
     assert "generate: 251.6 s, peak 13.8 GB" in result.output
     (request,) = fake.requests
     assert (request.prompt, request.n, request.seed, request.width) == ("a red apple", 2, 7, 768)
+
+
+def test_rerank_prints_the_best_candidate(capsys: pytest.CaptureFixture[str]) -> None:
+    best = Path("/runs/x/best.png")
+    cli._render(RerankDone(1, best, [0.5, 2.0], [0.62, 0.88], [2, 1], False, 0.5))
+    out = capsys.readouterr()
+    assert out.out == "best: candidate 2 (prob 0.88): /runs/x/best.png\n"
+    assert out.err == ""
+
+
+def test_low_confidence_warns_on_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    cli._render(RerankDone(0, Path("/b.png"), [-0.5], [0.38], [1], True, 0.5))
+    out = capsys.readouterr()
+    assert out.out == "best: candidate 1 (prob 0.38): /b.png\n"
+    assert out.err == "low confidence: no candidate scored above 0.50; results are saved\n"
 
 
 def test_generate_exit_code_follows_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
