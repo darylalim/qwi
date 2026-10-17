@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
+from qwi import models
 from qwi.config import DEFAULTS
 from qwi.stages.rerank import (
     SYSTEM,
@@ -43,6 +44,76 @@ def test_messages_follow_the_upstream_structure() -> None:
         "Judge whether the Document meets the requirements based on the Query and the Instruct "
         'provided. Note that the answer can only be "yes" or "no".'
     )
+
+
+# --- Chat template snapshot (§5.3 Tests: catches template drift) ---------------------------
+
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "rerank"
+# The pinned reranker's chat_template.jinja (Apache-2.0, see NOTICE): the processor renders
+# with exactly this file (checked 2026-10-17), so CI can render it without the model cache.
+TEMPLATE = FIXTURES / "chat_template.jinja"
+RENDERED = (
+    "<|im_start|>system\n"
+    "Judge whether the Document meets the requirements based on the Query and the Instruct "
+    'provided. Note that the answer can only be "yes" or "no".<|im_end|>\n'
+    "<|im_start|>user\n"
+    "<Instruct>: Given an image-generation request, judge whether the image faithfully depicts "
+    "everything the request asks for.<Query>:a red cube on a white table\n"
+    "<Document>:<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+
+
+def render(msgs: list[dict[str, Any]], template: str) -> str:
+    from transformers.utils.chat_template_utils import render_jinja_template
+
+    (text,), _ = render_jinja_template([msgs], chat_template=template, add_generation_prompt=True)
+    return text
+
+
+def test_messages_render_to_the_upstream_sequence() -> None:
+    image = Image.new("RGB", (768, 768))
+    msgs = messages(DEFAULTS.rerank_instruction, "a red cube on a white table", image)
+    # Parts joined with no separators; ends with the assistant turn whose first logit is scored.
+    assert render(msgs, TEMPLATE.read_text(encoding="utf-8")) == RENDERED
+
+
+@pytest.mark.slow
+def test_the_fixture_is_the_pinned_models_template() -> None:
+    # Needs the local HF cache (no weights load): a revision bump that changes the template
+    # fails here, so the snapshot above is updated on purpose, not silently.
+    import mlx_vlm.models.qwen3_vl.processing_qwen3_vl  # noqa: F401  # mlx-vlm's processor patch
+    from mlx_vlm.utils import load_processor
+
+    snapshot = models.resolve("rerank")
+    assert (snapshot / "chat_template.jinja").read_bytes() == TEMPLATE.read_bytes()
+    processor = load_processor(snapshot)
+    msgs = messages(
+        DEFAULTS.rerank_instruction, "a red cube on a white table", Image.new("RGB", (768, 768))
+    )
+    text = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    assert text == RENDERED
+
+
+# The §5.3 sanity test's fixed image: Qwen-Image-2.1 output (Qwen Research License, see
+# NOTICE) from `qwi generate "a red cube on a white table" -n 1 --seed 0 --no-rewrite`.
+RED_CUBE = FIXTURES / "red_cube.png"
+
+
+@pytest.mark.slow
+def test_the_correct_caption_scores_highest() -> None:
+    image = Image.open(RED_CUBE)
+    image.load()
+    stage = Rerank(models.resolve("rerank"))
+    stage.load()
+    try:
+        correct = stage("a red cube on a white table", image)
+        wrong = [stage(q, image) for q in ("a blue sphere on a wooden floor", "a bowl of soup")]
+    finally:
+        stage.unload()
+    assert correct.prob > 0.5
+    assert all(correct.margin > w.margin for w in wrong), (correct, wrong)
+    assert not correct.resized
 
 
 # --- Image mode safeguard -------------------------------------------------------------------

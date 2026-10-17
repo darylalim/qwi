@@ -7,3 +7,10 @@ research and non-commercial purposes; this applies to images generated with it.
 
 The guard output parser (src/qwi/stages/guard.py) uses the parsing regexes from the
 Qwen3Guard-Gen model card (Qwen team, Apache License 2.0).
+
+tests/fixtures/rerank/chat_template.jinja is the chat template of Qwen3-VL-Reranker-2B
+(Qwen team, Apache License 2.0), copied unmodified from the mlx-community 8-bit conversion
+for a template snapshot test.
+
+tests/fixtures/rerank/red_cube.png was generated with Qwen-Image-2.1 and is therefore
+under the Qwen Research License (research and non-commercial use), not Apache-2.0.
