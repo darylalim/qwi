@@ -55,25 +55,15 @@ class InsufficientMemory(QwiError):
     """The pre-flight estimate for a stage exceeds the wired memory limit: it can't run at all."""
 
     exit_code = 4
-    reason = "the GPU memory limit"
 
     def __init__(self, stage: str, need_gb: float, have_gb: float) -> None:
         super().__init__(
             f"Not enough free memory for {stage}: needs {need_gb:.1f} GB, "
-            f"{have_gb:.1f} GB within {self.reason}; {_SMALLER}"
+            f"{have_gb:.1f} GB within the GPU memory limit; {_SMALLER}"
         )
         self.stage = stage
         self.need_gb = need_gb
         self.have_gb = have_gb
-
-
-class SwapRisk(InsufficientMemory):
-    """The estimate fits the wired limit but not available memory: the run would likely swap.
-
-    The CLI's `--allow-swap` (or the UI's confirmation) continues anyway (§5.11 pre-flight).
-    """
-
-    reason = "available memory (pass --allow-swap to run anyway)"
 
 
 class DeviceOutOfMemory(QwiError):

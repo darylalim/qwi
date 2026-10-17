@@ -4,7 +4,7 @@ import pytest
 
 from qwi import paths, preflight
 from qwi.config import DEFAULTS, GiB
-from qwi.errors import InsufficientMemory, SwapRisk
+from qwi.errors import InsufficientMemory
 
 LIMIT = 26800603136  # max_recommended_working_set_size on the M2 Max (24.96 GiB)
 HEADROOM_GB = DEFAULTS.preflight_headroom_bytes / 1e9
@@ -33,30 +33,21 @@ def test_ok_when_the_estimate_fits() -> None:
     assert check.limit_gb == pytest.approx(LIMIT / 1e9 - HEADROOM_GB)
 
 
-def test_refuses_over_the_wired_limit_even_with_allow_swap() -> None:
-    with pytest.raises(InsufficientMemory) as excinfo:
-        preflight.check(
-            "generate", 37.9, allow_swap=True, limit_bytes=LIMIT, available_bytes=30 * GiB
-        )
-    assert not isinstance(excinfo.value, SwapRisk)
+def test_refuses_over_the_wired_limit() -> None:
+    with pytest.raises(InsufficientMemory):
+        preflight.check("generate", 37.9, limit_bytes=LIMIT, available_bytes=30 * GiB)
 
 
-def test_swap_risk_is_refused_without_allow_swap() -> None:
-    with pytest.raises(SwapRisk):
-        preflight.check("generate", 17.8, limit_bytes=LIMIT, available_bytes=16 * GiB)
-
-
-def test_swap_risk_continues_with_allow_swap() -> None:
-    check = preflight.check(
-        "generate", 17.8, allow_swap=True, limit_bytes=LIMIT, available_bytes=16 * GiB
-    )
-    assert check.decision == "swap_risk_allowed"
+def test_swap_risk_warns_and_continues() -> None:
+    # Runs this far over "available" swapped 0 bytes (§8 2026-10-17); the watchdog guards instead.
+    check = preflight.check("generate", 17.8, limit_bytes=LIMIT, available_bytes=16 * GiB)
+    assert check.decision == "swap_risk"
 
 
 def test_headroom_is_subtracted_from_available_memory() -> None:
     # 19 GB available fits 17.8 GB only without the 2 GiB headroom.
-    with pytest.raises(SwapRisk):
-        preflight.check("generate", 17.8, limit_bytes=LIMIT, available_bytes=19 * 10**9)
+    check = preflight.check("generate", 17.8, limit_bytes=LIMIT, available_bytes=19 * 10**9)
+    assert check.decision == "swap_risk"
 
 
 def test_reads_the_machine_when_not_given(monkeypatch: pytest.MonkeyPatch) -> None:

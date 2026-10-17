@@ -5,8 +5,8 @@ transient peak (for generate, the VAE decode) and is the larger of the static es
 the largest peak measured for that stage in the last matching runs.
 
 - estimate > wired limit → `InsufficientMemory` (the run can't work at all);
-- estimate > available → `SwapRisk`, unless `allow_swap`, which also raises the swap watchdog's
-  limit (§8 2026-10-15 `--allow-swap`);
+- estimate > available → a `swap_risk` warning, then continue: `vm_stat` undercounts what macOS
+  frees without swapping, so the swap watchdog is the guard (§8 2026-10-17);
 - otherwise → ok.
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 
 from qwi import logs, memory, paths
 from qwi.config import DEFAULTS
-from qwi.errors import InsufficientMemory, SwapRisk
+from qwi.errors import InsufficientMemory
 
 HISTORY_RUNS = 10
 
@@ -75,7 +75,7 @@ class Check:
     est_gb: float
     avail_gb: float
     limit_gb: float
-    decision: str  # ok | swap_risk_allowed
+    decision: str  # ok | swap_risk
 
     def as_record(self) -> dict[str, Any]:
         """The `run.json` `preflight[stage]` entry."""
@@ -86,7 +86,6 @@ def check(
     stage: str,
     est_gb: float,
     *,
-    allow_swap: bool = False,
     limit_bytes: int | None = None,
     available_bytes: int | None = None,
     headroom_bytes: int = DEFAULTS.preflight_headroom_bytes,
@@ -103,10 +102,7 @@ def check(
         # WARNING: the caller logs the resulting error once, as ERROR with its traceback.
         logs.event(logging.WARNING, stage, "preflight", "refused: over the memory limit", **context)
         raise InsufficientMemory(stage, est_gb, limit_gb)
-    if est_gb > avail_gb and not allow_swap:
-        logs.event(logging.WARNING, stage, "preflight", "refused: swap risk", **context)
-        raise SwapRisk(stage, est_gb, avail_gb)
-    decision = "swap_risk_allowed" if est_gb > avail_gb else "ok"
+    decision = "swap_risk" if est_gb > avail_gb else "ok"
     lvl = logging.WARNING if decision != "ok" else logging.INFO
     logs.event(lvl, stage, "preflight", decision, **context)
     return Check(est_gb, avail_gb, limit_gb, decision)

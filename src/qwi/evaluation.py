@@ -174,7 +174,8 @@ class EvalRunner:
         results_dir = paths.eval_results_dir() / request.name
         images_dir = paths.eval_dir() / request.name
         # Only saved images make a variant: a run that failed before its first image (e.g. a
-        # SwapRisk at generate) can be retried under the same name; run.log keeps both attempts.
+        # pre-flight refusal at generate) can be retried under the same name; run.log keeps
+        # both attempts.
         saved = results_dir / "results.jsonl"
         if saved.exists() and saved.stat().st_size:
             raise EvalExists(f"{results_dir} has results; pick another --variant name")
@@ -286,7 +287,7 @@ class EvalRunner:
 
     def _check(self, stage: str, request: EvalRequest) -> None:
         self._stage = stage
-        preflight.check(stage, preflight.STATIC_GB[stage], allow_swap=request.allow_swap)
+        preflight.check(stage, preflight.STATIC_GB[stage])
         if request.cancel.is_set():
             raise GenerationCancelled()
 
@@ -324,7 +325,7 @@ class EvalRunner:
         if not prompts:
             return  # every prompt was blocked
         est = preflight.generate_gb(request.width, request.height, encoder_resident=False)
-        check = preflight.check("generate", est, allow_swap=request.allow_swap)
+        check = preflight.check("generate", est)
         watchdog = memory.SwapWatchdog("generate", preflight.swap_limit_bytes(request.allow_swap))
         watchdog.start()
         generator = self._make_generate(self._resolve("image"), [], watchdog)

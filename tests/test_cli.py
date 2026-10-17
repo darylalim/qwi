@@ -97,7 +97,7 @@ def test_generate_renders_events_and_exits_0(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_generate_exit_code_follows_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    error = {"type": "SwapRisk", "message": "Not enough free memory for generate"}
+    error = {"type": "InsufficientMemory", "message": "Not enough free memory for generate"}
     monkeypatch.setattr(cli, "Pipeline", FakePipeline("error", error))
     result = runner.invoke(cli.app, ["generate", "p"])
     assert result.exit_code == 4

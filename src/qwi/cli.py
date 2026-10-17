@@ -148,7 +148,11 @@ def generate(
         bool, typer.Option("--show-rewrite", help="Print the rewrite before generating.")
     ] = False,
     allow_swap: Annotated[
-        bool, typer.Option("--allow-swap", help="Run even if pre-flight expects swap.")
+        bool,
+        typer.Option(
+            "--allow-swap",
+            help="Let a stage swap up to 6 GiB (default 2 GiB) before it is stopped.",
+        ),
     ] = False,
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="DEBUG logs.")] = False,
 ) -> None:
@@ -305,7 +309,13 @@ def eval_run(
     rewrite_style: Annotated[
         RewriteStyle, typer.Option(help="Rewriter system prompt.")
     ] = REWRITE_STYLE,
-    allow_swap: Annotated[bool, typer.Option("--allow-swap")] = False,
+    allow_swap: Annotated[
+        bool,
+        typer.Option(
+            "--allow-swap",
+            help="Let a stage swap up to 6 GiB (default 2 GiB) before it is stopped.",
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False,
 ) -> None:
     """Generate the eval set (12 prompts x seeds) for one variant (§5.4 "Protocol").
