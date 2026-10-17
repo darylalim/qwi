@@ -210,7 +210,7 @@ def test_a_run_writes_candidates_and_a_final_record(h: Harness) -> None:
         "n": 3,
         "steps": 2,
         "encoder": "A-q4",
-        "rewrite": "short",
+        "rewrite": "long",
         "base_seed": 100,
         "allow_swap": False,
     }
@@ -655,7 +655,7 @@ def test_a_fallback_generates_from_the_user_prompt_without_a_second_pass(h: Harn
     assert rec.guard["rewrite"] is None
     assert h.stages[0].encoded == ([request_prompt], "A-q4")
     (ready,) = [e for e in h.events if isinstance(e, RewriteReady)]
-    assert (ready.fallback_reason, ready.style) == ("quoted_text_missing", "short")
+    assert (ready.fallback_reason, ready.style) == ("quoted_text_missing", "long")
     (line,) = logs.read(run_dir(rec) / "run.log", "warning")
     assert (line["event"], line["msg"]) == ("rewrite_ready", "fallback: quoted_text_missing")
 

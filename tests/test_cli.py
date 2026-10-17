@@ -155,9 +155,12 @@ def test_rewrite_flags_reach_the_request(monkeypatch: pytest.MonkeyPatch) -> Non
     assert runner.invoke(cli.app, ["generate", "p"]).exit_code == 0
     args = ["generate", "p", "--no-rewrite", "--rewrite-style", "long"]
     assert runner.invoke(cli.app, args).exit_code == 0
+    args = ["generate", "p", "--rewrite-style", "short"]
+    assert runner.invoke(cli.app, args).exit_code == 0
     assert [(r.rewrite, r.rewrite_style) for r in fake.requests] == [
-        (True, "short"),
+        (True, "long"),
         (False, "long"),
+        (True, "short"),
     ]
 
 
