@@ -511,9 +511,9 @@ def test_rescore_writes_its_own_file_and_leaves_results_alone(r: Runner) -> None
         ("isolated", 1000, 0.5),
         ("isolated", 1001, 0.0),
     ]
-    assert {row["instruction"] for row in rows} == {DEFAULTS.rerank_generic_instruction}
+    assert {row["instruction"] for row in rows} == {DEFAULTS.rerank_instruction}
     assert {row["label"] for row in rows} == {"generic"}
-    assert r.rerankers[-1].instruction == DEFAULTS.rerank_generic_instruction
+    assert r.rerankers[-1].instruction == DEFAULTS.rerank_instruction
     assert (r.rerankers[-1].loaded, r.rerankers[-1].unloaded) == (True, True)
     assert r.roles == ["rerank"]
     assert not lock.is_held()
@@ -564,8 +564,8 @@ def test_cli_eval_passes_the_rerank_instruction(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.parametrize(
     ("args", "instruction"),
     [
-        (["--label", "generic"], DEFAULTS.rerank_generic_instruction),
-        (["--label", "task"], DEFAULTS.rerank_instruction),
+        (["--label", "generic"], DEFAULTS.rerank_instruction),
+        (["--label", "task"], DEFAULTS.rerank_task_instruction),
         (["--label", "mine", "--rerank-instruction", "Is it apples?"], "Is it apples?"),
     ],
     ids=["generic", "task", "custom"],

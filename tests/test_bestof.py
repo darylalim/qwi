@@ -45,7 +45,7 @@ def bo4(name: str = "bo4", seeds: dict[str, tuple[int, ...]] | None = None) -> P
                     "image": image,
                     "rerank_margin": seed / 1000,  # the task instruction always picks 2003
                     "rerank_prob": 0.9,
-                    "rerank_instruction": DEFAULTS.rerank_instruction,
+                    "rerank_instruction": DEFAULTS.rerank_task_instruction,
                     "seconds": {"generate": 120.0},
                     "peak_gb": {"generate": 14.0},
                     "swap_gb": 0.0,
@@ -384,8 +384,8 @@ def test_calibrate_scores_each_instruction_against_the_human(session: Path) -> N
     rescored("generic", lambda i, s: -s)  # generic prefers the lowest seed: 2000
     c = bestof.calibrate(session)
     task, generic = c.instructions
-    assert (task.label, task.instruction) == ("task", DEFAULTS.rerank_instruction)
-    assert (generic.label, generic.instruction) == ("generic", DEFAULTS.rerank_generic_instruction)
+    assert (task.label, task.instruction) == ("task", DEFAULTS.rerank_task_instruction)
+    assert (generic.label, generic.instruction) == ("generic", DEFAULTS.rerank_instruction)
     # task always picks 2003 (never best, never acceptable); generic always picks 2000.
     assert (task.agreement, task.top_acceptable) == (0, 0)
     assert (generic.agreement, generic.top_acceptable) == (12, 12)
@@ -405,7 +405,7 @@ def test_a_margin_tie_goes_to_the_lowest_seed(session: Path) -> None:
 def test_a_full_tie_keeps_the_default_instruction(session: Path) -> None:
     judge_all(session, best_seed=2003, ok_seeds=(2003,))
     rescored("generic", lambda i, s: s)  # the same picks as task
-    assert bestof.calibrate(session).winner == "task"
+    assert bestof.calibrate(session).winner == "generic"  # the default; task is listed first
 
 
 def test_min_score_separates_prompts_with_no_acceptable_candidate(session: Path) -> None:

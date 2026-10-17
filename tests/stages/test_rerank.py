@@ -57,8 +57,8 @@ RENDERED = (
     "Judge whether the Document meets the requirements based on the Query and the Instruct "
     'provided. Note that the answer can only be "yes" or "no".<|im_end|>\n'
     "<|im_start|>user\n"
-    "<Instruct>: Given an image-generation request, judge whether the image faithfully depicts "
-    "everything the request asks for.<Query>:a red cube on a white table\n"
+    "<Instruct>: Given a search query, retrieve relevant candidates that answer the query."
+    "<Query>:a red cube on a white table\n"
     "<Document>:<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
     "<|im_start|>assistant\n"
 )

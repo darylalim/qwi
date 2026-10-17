@@ -25,15 +25,15 @@ class Defaults:
     # Per style: generation budget, and the word count above which the original prompt is kept.
     rewrite_max_tokens: dict[str, int] = field(default_factory=lambda: {"short": 256, "long": 1024})
     rewrite_max_words: dict[str, int] = field(default_factory=lambda: {"short": 200, "long": 700})
-    # Reranker (PLAN.md §5.3): the task-specific instruction (upstream's card: +1-5 points over
-    # the generic one); M3's best-of-4 calibration picks between them (§5.4).
+    # Reranker (PLAN.md §5.3): upstream's generic instruction (the model card's default) won M3's
+    # best-of-4 calibration over the task-specific one (§8 2026-10-17 "Reranker instruction").
     rerank_instruction: str = (
+        "Given a search query, retrieve relevant candidates that answer the query."
+    )
+    # The task-specific instruction it beat, kept as the `task` preset for re-scoring (§5.4).
+    rerank_task_instruction: str = (
         "Given an image-generation request, judge whether the image faithfully depicts "
         "everything the request asks for."
-    )
-    # Upstream's generic instruction (the model card's default): the calibration compares the two.
-    rerank_generic_instruction: str = (
-        "Given a search query, retrieve relevant candidates that answer the query."
     )
     # --min-score: below this best prob (the model leans "no"), warn that nothing clearly matched.
     rerank_min_score: float = 0.5
