@@ -32,6 +32,7 @@ INCONCLUSIVE_P = 0.05  # ... that the sign test can't tell from chance: extend t
 TIME_RATIO = 1.15
 PEAK_LIMIT_GB = 24.0
 EXTEND_SEEDS = (1002, 1003)
+EXT_SUFFIX = "-ext"  # `<name>-ext` holds the extension seeds of variant `<name>`
 
 
 def results_dir(arg: str) -> Path:
@@ -45,15 +46,25 @@ def results_dir(arg: str) -> Path:
 
 
 def load_results(dirs: list[Path]) -> tuple[str, dict[tuple[str, int], dict[str, Any]]]:
-    """One variant's rows keyed by (prompt id, seed), across one or more results folders."""
+    """One variant's rows keyed by (prompt id, seed), across one or more results folders.
+
+    `<name>-ext` (the extension seeds) counts as `<name>`, as long as the run configs agree on
+    every key they share (older runs lack keys added later, e.g. M1 rows have no `rewrite`).
+    """
     rows: dict[tuple[str, int], dict[str, Any]] = {}
     variants: set[str] = set()
+    config: dict[str, Any] = {}
     for d in dirs:
         for line in (d / "results.jsonl").read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
                 rows[(row["id"], int(row["seed"]))] = row
-                variants.add(row["variant"])
+                variants.add(row["variant"].removesuffix(EXT_SUFFIX))
+                for key, value in (row.get("config") or {}).items():
+                    if config.setdefault(key, value) != value:
+                        raise SessionError(
+                            f"one run config per side: {key} is {config[key]!r} and {value!r}"
+                        )
     if len(variants) != 1:
         raise SessionError(f"one variant per side, got {sorted(variants)}")
     return variants.pop(), rows
