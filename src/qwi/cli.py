@@ -31,7 +31,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
-from qwi.pipeline import GenerateRequest, Pipeline
+from qwi.pipeline import GenerateRequest, Pipeline, continue_seeds
 from qwi.stages.guard import GuardMode
 from qwi.stages.rewrite import RewriteStyle
 
@@ -46,6 +46,16 @@ app.add_typer(runs_app, name="runs")
 MARK = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL"}
 GUARD_MODE = GuardMode(DEFAULTS.guard_mode)
 REWRITE_STYLE = RewriteStyle(DEFAULTS.rewrite_style)
+# What --continue-seeds takes from its source run, so these can't be given with it (§5.3).
+FROM_SOURCE = {
+    "prompt": "PROMPT",
+    "seed": "--seed",
+    "steps": "--steps",
+    "width": "--width",
+    "height": "--height",
+    "no_rewrite": "--no-rewrite",
+    "rewrite_style": "--rewrite-style",
+}
 
 
 def _version(value: bool) -> None:
@@ -145,14 +155,25 @@ def _render(event: Event, show_rewrite: bool = False) -> None:
             typer.echo(f"best: candidate {best_index + 1} (prob {prob:.2f}): {best_path}")
             if low:
                 typer.echo(
-                    f"low confidence: no candidate scored above {floor:.2f}; results are saved",
+                    f"low confidence: no candidate scored above {floor:.2f}; results are saved. "
+                    f"More candidates: qwi generate --continue-seeds {best_path.parent.name}",
                     err=True,
                 )
 
 
+def _on_command_line(ctx: typer.Context, name: str) -> bool:
+    """Whether the user typed this parameter (not its default).
+
+    Typer bundles its own click, so compare the source's name, not `click.core.ParameterSource`.
+    """
+    source = ctx.get_parameter_source(name)
+    return source is not None and source.name == "COMMANDLINE"
+
+
 @app.command()
 def generate(
-    prompt: Annotated[str, typer.Argument(help="What to draw.")],
+    ctx: typer.Context,
+    prompt: Annotated[str | None, typer.Argument(help="What to draw.")] = None,
     n: Annotated[int, typer.Option("-n", min=1, help="Candidates (seeds).")] = DEFAULTS.n,
     steps: Annotated[int, typer.Option(min=1, help="Denoising steps.")] = DEFAULTS.steps,
     width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
@@ -189,6 +210,14 @@ def generate(
             help="Let a stage swap up to 6 GiB (default 2 GiB) before it is stopped.",
         ),
     ] = False,
+    continue_from: Annotated[
+        str | None,
+        typer.Option(
+            "--continue-seeds",
+            metavar="RUN_ID",
+            help="N more seeds after this run's last one: its prompt, size and steps, no rewrite.",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="DEBUG logs.")] = False,
 ) -> None:
     """Generate N candidates for a prompt; writes images + run.json under $QWI_HOME/runs."""
@@ -196,7 +225,7 @@ def generate(
         raise typer.BadParameter("must not be empty", param_hint="--rerank-instruction")
     logs.app_log(verbose)
     request = GenerateRequest(
-        prompt,
+        prompt or "",
         n=n,
         steps=steps,
         width=width,
@@ -210,6 +239,21 @@ def generate(
         allow_swap=allow_swap,
         verbose=verbose,
     )
+    if continue_from is not None:
+        given = [hint for name, hint in FROM_SOURCE.items() if _on_command_line(ctx, name)]
+        if given:
+            raise typer.BadParameter(
+                f"comes from the source run; don't also give {', '.join(given)}",
+                param_hint="--continue-seeds",
+            )
+        try:
+            run = storage.find_run(continue_from)
+            request = continue_seeds(run, request, n if _on_command_line(ctx, "n") else None)
+        except QwiError as exc:
+            raise _fail(exc) from exc
+        typer.echo(f"continuing {run.name}: same prompt, no rewrite")
+    elif prompt is None:
+        raise typer.BadParameter("give a prompt, or --continue-seeds RUN_ID", param_hint="PROMPT")
     try:
         with cancel_on_signals(request.cancel):
             rec = Pipeline().run(request, partial(_render, show_rewrite=show_rewrite))
@@ -263,6 +307,8 @@ def _show_record(run_id: str, rec: record.RunRecord) -> None:
     cfg = rec.config
     typer.echo(f"run      {run_id}  [{rec.status}]  started {rec.started_at}  pid {rec.pid}")
     typer.echo(f"prompt   {rec.user_prompt}")
+    if rec.continued_from:
+        typer.echo(f"continue from {rec.continued_from}: its prompt, no new rewrite")
     if rec.guard:
         typer.echo(f"guard    {rec.guard['decision']} ({rec.guard['mode']})", nl=False)
         typer.echo(f": {rec.guard['reason']}" if rec.guard["reason"] else "")

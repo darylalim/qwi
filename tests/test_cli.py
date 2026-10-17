@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,10 @@ def test_low_confidence_warns_on_stderr(capsys: pytest.CaptureFixture[str]) -> N
     cli._render(done(low=True, margins=(-0.5,)))
     out = capsys.readouterr()
     assert out.out.splitlines()[-1] == "best: candidate 1 (prob 0.38): /runs/x/best.png"
-    assert out.err == "low confidence: no candidate scored above 0.50; results are saved\n"
+    assert out.err == (
+        "low confidence: no candidate scored above 0.50; results are saved. "
+        "More candidates: qwi generate --continue-seeds x\n"
+    )
 
 
 def test_rerank_flags_reach_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -375,3 +379,121 @@ def test_version_comes_from_the_package_metadata() -> None:
     assert result.output == f"qwi {version('qwi')}\n"
     declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     assert version("qwi") == declared  # the installed metadata matches pyproject.toml
+
+
+def plain(text: str) -> str:
+    """Drop ANSI styling and Rich's error box, and join its wrapped lines into one."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)  # CI advertises color
+    return " ".join(text.replace("│", " ").split())
+
+
+def source_run(status: str = "ok") -> Path:
+    run = paths.new_run_dir()
+    rec = RunRecord(
+        "a red apple",
+        status=status,
+        rewritten_prompt="A glossy red apple",
+        prompt_source="rewrite",
+        seeds=[7, 8],
+        candidates=[{"index": i, "seed": 7 + i, "path": f"cand_{i}.png"} for i in range(2)],
+        config={
+            "width": 512,
+            "height": 512,
+            "n": 2,
+            "steps": 4,
+            "encoder": "A-q4",
+            "rewrite": "long",
+        },
+    )
+    record.write(rec, run)
+    return run
+
+
+def test_continue_seeds_runs_the_source_prompt_from_its_next_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    run = source_run()
+    args = ["generate", "--continue-seeds", run.name, "--min-score", "0.7"]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert f"continuing {run.name}: same prompt, no rewrite" in result.output
+    (request,) = fake.requests
+    assert (request.prompt, request.seed, request.n, request.width, request.steps) == (
+        "a red apple",
+        9,
+        2,
+        512,
+        4,
+    )
+    assert request.continuation.prompt == "A glossy red apple"
+    assert request.continuation.run_id == run.name
+    assert request.min_score == 0.7
+
+
+def test_continue_seeds_takes_n_and_a_run_id_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    run = source_run()
+    result = runner.invoke(cli.app, ["generate", "--continue-seeds", run.name[:-2], "-n", "6"])
+    assert result.exit_code == 0, result.output
+    (request,) = fake.requests
+    assert (request.seed, request.n) == (9, 6)
+
+
+@pytest.mark.parametrize(
+    ("extra", "named"),
+    [
+        (["a red apple"], "PROMPT"),
+        (["--seed", "3"], "--seed"),
+        (["--steps", "8", "--width", "256"], "--steps, --width"),
+        (["--no-rewrite"], "--no-rewrite"),
+        (["--rewrite-style", "short"], "--rewrite-style"),
+    ],
+    ids=["prompt", "seed", "size", "no-rewrite", "style"],
+)
+def test_continue_seeds_refuses_what_comes_from_the_source(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str], named: str
+) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    result = runner.invoke(cli.app, ["generate", *extra, "--continue-seeds", source_run().name])
+    assert result.exit_code == 2
+    assert f"don't also give {named}" in plain(result.output)
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        (lambda: "nope", "Run 'nope': no match"),
+        (lambda: source_run("interrupted").name, "it is interrupted"),
+    ],
+    ids=["unknown", "interrupted"],
+)
+def test_continue_seeds_refuses_a_run_it_cannot_continue(
+    monkeypatch: pytest.MonkeyPatch, make: Any, message: str
+) -> None:
+    fake = FakePipeline("ok")
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    result = runner.invoke(cli.app, ["generate", "--continue-seeds", make()])
+    assert result.exit_code == 1
+    assert message in result.output
+    assert fake.requests == []
+
+
+def test_generate_needs_a_prompt_or_continue_seeds() -> None:
+    result = runner.invoke(cli.app, ["generate"])
+    assert result.exit_code == 2
+    assert "give a prompt, or --continue-seeds RUN_ID" in plain(result.output)
+
+
+def test_runs_show_names_the_source_of_a_continued_run() -> None:
+    run = source_run()
+    rec = record.read(run)
+    rec.continued_from = "20261017-090000-abcdef"
+    record.write(rec, run)
+    result = runner.invoke(cli.app, ["runs", "show", run.name])
+    assert result.exit_code == 0, result.output
+    assert "continue from 20261017-090000-abcdef: its prompt, no new rewrite" in result.output

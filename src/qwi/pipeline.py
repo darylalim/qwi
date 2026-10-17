@@ -5,7 +5,8 @@ One run at a time (`RunLock`). Each stage: pre-flight check → load → run →
 traceback of any error is in `run.log`. Only `PipelineBusy` is raised, because no run exists then.
 
 Stages: guard (input) → rewrite → guard (rewrite) → encode → generate → rerank (§1, §5.1-5.3);
-`--no-rewrite` skips the rewrite and the second pass. Rerank runs only once every candidate is
+`--no-rewrite` skips the rewrite and the second pass, and so does `--continue-seeds`, which reuses
+its source run's prompt (`continue_seeds`). Rerank runs only once every candidate is
 saved: after a failure or a cancel the kept candidates stay unranked (§5.11).
 """
 
@@ -15,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,7 +24,7 @@ from PIL import Image
 
 from qwi import errors, logs, memory, models, paths, preflight, record, storage
 from qwi.config import DEFAULTS
-from qwi.errors import GenerationCancelled, GuardBlocked
+from qwi.errors import GenerationCancelled, GuardBlocked, RunNotContinuable
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
@@ -35,7 +36,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
-from qwi.lock import RunLock
+from qwi.lock import RunLock, is_held
 from qwi.record import RunRecord
 from qwi.stages import guard, rerank
 from qwi.stages.encode import PromptEmbeds
@@ -45,6 +46,19 @@ from qwi.stages.rewrite import Rewrite, Rewritten
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
 ROLES = ["guard", "rewrite", "image", "rerank"]  # models a run can load
+
+
+@dataclass(frozen=True)
+class Continuation:
+    """What a `--continue-seeds` run reuses from its source run instead of rewriting (§5.3)."""
+
+    run_id: str
+    prompt: str  # the source's generation prompt: its rewrite, or the user's prompt
+    rewritten_prompt: str
+    rewrite_fallback_reason: str | None
+    prompt_source: str
+    rerank_query: str
+    rewrite: str  # the source's `config["rewrite"]`: the style its prompt came from, or "none"
 
 
 @dataclass
@@ -62,6 +76,7 @@ class GenerateRequest:
     min_score: float = DEFAULTS.rerank_min_score
     allow_swap: bool = False
     verbose: bool = False
+    continuation: Continuation | None = None  # --continue-seeds: no rewrite, the source's prompt
     cancel: threading.Event = field(default_factory=threading.Event)
 
 
@@ -127,7 +142,46 @@ def default_rerank_stage(model_path: Path, instruction: str) -> RerankStage:
 
 def roles(request: GenerateRequest) -> list[str]:
     """The models this request loads: what startup checks and `run.json` records."""
-    return [r for r in ROLES if r != "rewrite" or request.rewrite]
+    rewrites = request.rewrite and request.continuation is None
+    return [r for r in ROLES if r != "rewrite" or rewrites]
+
+
+def continue_seeds(run: Path, options: GenerateRequest, n: int | None = None) -> GenerateRequest:
+    """The request for `qwi generate --continue-seeds <run>` (§5.3 "Low-confidence warning").
+
+    N more seeds after the source's last one (its N unless `n` is given), at its size and steps,
+    from its generation prompt and `rerank_query`, with no new rewrite; the input guard still
+    runs. The new run ranks only its own candidates. The rest (guard mode, reranker settings,
+    swap, verbose, cancel) comes from `options`.
+    """
+    source = record.repair_if_interrupted(run, lock_held=is_held())
+    if source.status in ("running", "interrupted"):
+        raise RunNotContinuable(run.name, f"it is {source.status}")
+    if not source.candidates:
+        raise RunNotContinuable(run.name, "it has no candidates to continue from")
+    config = source.config
+    if config.get("encoder") != ENCODER:
+        raise RunNotContinuable(run.name, f"it used encoder {config.get('encoder')}, not {ENCODER}")
+    used_rewrite = source.prompt_source != "user"
+    continuation = Continuation(
+        run.name,
+        source.rewritten_prompt if used_rewrite else source.user_prompt,
+        source.rewritten_prompt,
+        source.rewrite_fallback_reason,
+        source.prompt_source,
+        source.rerank_query,
+        config["rewrite"],
+    )
+    return replace(
+        options,
+        prompt=source.user_prompt,
+        n=config["n"] if n is None else n,
+        width=config["width"],
+        height=config["height"],
+        steps=config["steps"],
+        seed=source.seeds[-1] + 1,
+        continuation=continuation,
+    )
 
 
 def ignore_event(_: Event) -> None:
@@ -193,6 +247,13 @@ class Pipeline:
                 "allow_swap": request.allow_swap,
             },
         )
+        if (source := request.continuation) is not None:  # the source's prompt, not a new one
+            rec.continued_from = source.run_id
+            rec.rewritten_prompt = source.rewritten_prompt
+            rec.rewrite_fallback_reason = source.rewrite_fallback_reason
+            rec.prompt_source = source.prompt_source
+            rec.rerank_query = source.rerank_query
+            rec.config["rewrite"] = source.rewrite
         self._stage = None
         with logs.run_log(run, request.verbose):
             record.write(rec, run)
@@ -242,6 +303,8 @@ class Pipeline:
                 verdict = checker(request.prompt)
             result = guard.decide(request.guard_mode, verdict, policy=policy)
             self._verdict(rec, run, on_event, "input", verdict, result, policy)
+            if request.continuation is not None:  # its source's rewrite passed the guard there
+                return request.continuation.prompt
             if not request.rewrite:
                 return request.prompt
 

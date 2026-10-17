@@ -45,6 +45,7 @@ class RunRecord:
     peak_mem_gb: dict[str, float] = field(default_factory=dict)
     swap_gb: dict[str, float] = field(default_factory=dict)  # system swap-out delta per stage
     config: dict[str, Any] = field(default_factory=dict)  # steps, size, n, encoder, ...
+    continued_from: str | None = None  # --continue-seeds: the source run's id (§5.3)
 
     def __post_init__(self) -> None:
         self.rerank_query = self.rerank_query or self.user_prompt
