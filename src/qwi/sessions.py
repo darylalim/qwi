@@ -45,6 +45,14 @@ def results_dir(arg: str) -> Path:
     return path
 
 
+def _stored(path: Path) -> str:
+    """A results folder as `manifest.json` keeps it: its name if it lives in `eval/results/`
+    (committed, so no home directory in git and any checkout can compare), else the path."""
+    if path.resolve().parent == paths.eval_results_dir().resolve():
+        return path.name
+    return str(path)
+
+
 def load_results(dirs: list[Path]) -> tuple[str, dict[tuple[str, int], dict[str, Any]]]:
     """One variant's rows keyed by (prompt id, seed), across one or more results folders.
 
@@ -147,8 +155,8 @@ def create(
         old_items = [Item.from_dict(i) for i in old["items"]]
         for row in _read_review(extend):
             judged[(row["item"], row["check"])] = [row[c] for c in REVIEW_COLUMNS]
-        a = [Path(p) for p in old["a"]["results"]] + a
-        b = [Path(p) for p in old["b"]["results"]] + b
+        a = [results_dir(p) for p in old["a"]["results"]] + a
+        b = [results_dir(p) for p in old["b"]["results"]] + b
     seen = {(i.prompt_id, i.seed) for i in old_items}
     new_keys = [k for k in rows_a.keys() & rows_b.keys() if k not in seen]
     if not new_keys:
@@ -168,8 +176,8 @@ def create(
         "created": day.isoformat(),
         "shuffle_seed": seed,
         "extends": extend.name if extend else None,
-        "a": {"name": name_a, "results": [str(p) for p in a]},
-        "b": {"name": name_b, "results": [str(p) for p in b]},
+        "a": {"name": name_a, "results": [_stored(p) for p in a]},
+        "b": {"name": name_b, "results": [_stored(p) for p in b]},
         "items": [i.to_dict() for i in items],
     }
     (folder / "manifest.json").write_text(
@@ -300,8 +308,8 @@ def compare(session: Path, noise_floor: int = 0) -> Report:
             text.add(a_pass, b_pass)
 
     keys = {(i.prompt_id, i.seed) for i in items.values()}
-    _, rows_a = load_results([Path(p) for p in manifest["a"]["results"]])
-    _, rows_b = load_results([Path(p) for p in manifest["b"]["results"]])
+    _, rows_a = load_results([results_dir(p) for p in manifest["a"]["results"]])
+    _, rows_b = load_results([results_dir(p) for p in manifest["b"]["results"]])
     report = Report(
         session.name,
         manifest["a"]["name"],
@@ -495,7 +503,7 @@ def open_session(folder: Path) -> ReviewSession:
         found: dict[tuple[str, int], tuple[Path, dict[str, Any]]] = {}
         for results in manifest[variant]["results"]:
             images = paths.eval_dir() / Path(results).name  # §5.7: images live under $QWI_HOME
-            _, rows = load_results([Path(results)])
+            _, rows = load_results([results_dir(results)])
             found |= {key: (images / row["image"], row) for key, row in rows.items()}
         by_variant[variant] = found
     sides: dict[tuple[str, str], Side] = {}

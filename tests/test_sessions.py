@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import re
+import shutil
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -294,6 +295,32 @@ def test_a_clear_failure_on_few_pairs_is_worse_not_inconclusive(ab: tuple[Path, 
     session = new(ab)
     judge(session, first_checks(5, "pass", "fail", text=False))  # 5 discordant < 8
     assert sessions.compare(session).verdict == "worse"
+
+
+def test_the_manifest_names_results_so_another_checkout_can_compare(
+    ab: tuple[Path, Path], eval_set: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = new(ab)
+    judge(old)
+    manifest = json.loads((old / "manifest.json").read_text())
+    assert (manifest["a"]["results"], manifest["b"]["results"]) == (
+        ["2026-10-15_baseline"],
+        ["2026-10-15_short"],
+    )
+    # Another checkout: the same committed eval set somewhere else, the original gone.
+    moved = tmp_path / "elsewhere" / "eval"
+    shutil.move(eval_set, moved)
+    monkeypatch.setattr(paths, "EVAL_SET", moved)
+    assert sessions.compare(moved / "sessions" / old.name).overall.ties > 0
+    ext = sessions.create(
+        [results("baseline-ext", seeds=(1002, 1003))],
+        [results("short-ext", seeds=(1002, 1003))],
+        seed=8,
+        day=DAY,
+        extend=moved / "sessions" / old.name,
+    )
+    manifest = json.loads((ext / "manifest.json").read_text())
+    assert manifest["a"]["results"] == ["2026-10-15_baseline", "2026-10-15_baseline-ext"]
 
 
 def test_extending_keeps_judgments_and_adds_only_new_pairs(ab: tuple[Path, Path]) -> None:
