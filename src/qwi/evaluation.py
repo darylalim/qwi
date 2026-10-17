@@ -61,8 +61,8 @@ ISOLATED_MIN_SHARE = 0.9
 REVIEW_COLUMNS = ["item", "prompt_id", "seed", "image", "check", "result", "notes"]
 # `qwi eval rescore --label`: instructions the calibration compares (§5.4 "Best-of-4 calibration").
 RERANK_PRESETS = {
-    "task": DEFAULTS.rerank_instruction,
-    "generic": DEFAULTS.rerank_generic_instruction,
+    "task": DEFAULTS.rerank_task_instruction,
+    "generic": DEFAULTS.rerank_instruction,
 }
 LABEL = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
