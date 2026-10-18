@@ -29,6 +29,9 @@ QUALITY_SLACK = 2  # rule 1: losses - wins <= max(2, noise floor)
 BETTER_MARGIN = 3  # "B is better": wins - losses >= 3 (or a preference majority)
 INCONCLUSIVE_PAIRS = 8  # a rule failure on >= 8 discordant pairs ...
 INCONCLUSIVE_P = 0.05  # ... that the sign test can't tell from chance: extend the seeds
+# Rule 4: A preferred in over half the items with a preference → extend the seeds; on an
+# extended session, worse if the preference sign test gives p below this (§8 2026-10-18).
+PREFERENCE_P = 0.05
 TIME_RATIO = 1.15
 PEAK_LIMIT_GB = 24.0
 EXTEND_SEEDS = (1002, 1003)
@@ -268,6 +271,7 @@ class Report:
     res_a: Resources
     res_b: Resources
     noise_floor: int
+    extended: bool = False  # an `--extend` session: rule 4 decides instead of extending again
     rules: dict[str, bool] = field(default_factory=dict)
     verdict: str = ""
     reason: str = ""
@@ -332,28 +336,60 @@ def compare(session: Path, noise_floor: int = 0) -> Report:
         _resources([rows_a[k] for k in keys if k in rows_a]),
         _resources([rows_b[k] for k in keys if k in rows_b]),
         noise_floor,
+        extended=bool(manifest.get("extends")),
     )
     _decide(report)
     return report
 
 
+def _extend_hint(session: str) -> str:
+    seeds = ",".join(map(str, EXTEND_SEEDS))
+    return (
+        f"extend both variants to seeds {seeds} (`qwi eval --variant <name>-ext --seeds {seeds}`), "
+        f"then `qwi eval session --extend {session} --a <A-ext> --b <B-ext>`"
+    )
+
+
 def _decide(report: Report) -> None:
-    o, ra, rb = report.overall, report.res_a, report.res_b
+    o, ra, rb, pref = report.overall, report.res_a, report.res_b, report.prefer
+    voted = pref["a"] + pref["b"] + pref["same"]
+    against = voted > 0 and pref["a"] > voted / 2
     report.rules = {
         "quality": o.losses - o.wins <= max(QUALITY_SLACK, report.noise_floor),
         "text": report.text.losses <= report.text.wins,
         "time": rb.median_s <= TIME_RATIO * ra.median_s,
         "peak": rb.peak_gb <= PEAK_LIMIT_GB,
         "swap": rb.swapped_images == 0,
+        "preference": not against,
     }
-    voted = report.prefer["a"] + report.prefer["b"] + report.prefer["same"]
-    majority = voted > 0 and report.prefer["b"] > voted / 2
+    majority = voted > 0 and pref["b"] > voted / 2
     p = sign_test(o.wins, o.losses)
+    pref_p = sign_test(pref["b"], pref["a"])
     if not all(report.rules[r] for r in ("time", "peak", "swap")):
         failed = [r for r in ("time", "peak", "swap") if not report.rules[r]]
         report.verdict, report.reason = "worse", f"B fails the resource rule ({', '.join(failed)})"
     elif report.rules["quality"] and report.rules["text"]:
-        if o.wins - o.losses >= BETTER_MARGIN or majority:
+        # Rule 4 (§8 2026-10-18): a preference majority against B blocks "not worse" until
+        # the extension seeds show whether it's real; it also blocks "better" by wins.
+        if against and not report.extended:
+            report.verdict = "inconclusive"
+            report.reason = (
+                f"rules 1-3 pass, but A is preferred in {pref['a']} of {voted} items "
+                f"(p = {pref_p:.3f}): {_extend_hint(report.session)}"
+            )
+        elif against and pref_p < PREFERENCE_P:
+            report.verdict = "worse"
+            report.reason = (
+                f"B fails rule 4: after extending, A is preferred in {pref['a']} of {voted} "
+                f"items (p = {pref_p:.3f})"
+            )
+        elif against:
+            report.verdict = "not worse"
+            report.reason = (
+                f"passes rules 1-3; A's preference majority ({pref['a']} of {voted}) "
+                f"is not significant after extending (p = {pref_p:.3f})"
+            )
+        elif o.wins - o.losses >= BETTER_MARGIN or majority:
             why = (
                 f"wins - losses = {o.wins - o.losses}"
                 if o.wins - o.losses >= BETTER_MARGIN
@@ -361,15 +397,12 @@ def _decide(report: Report) -> None:
             )
             report.verdict, report.reason = "better", f"not worse on every rule, and {why}"
         else:
-            report.verdict, report.reason = "not worse", "passes rules 1-3"
+            report.verdict, report.reason = "not worse", "passes rules 1-4"
     elif o.discordant >= INCONCLUSIVE_PAIRS and p >= INCONCLUSIVE_P:
         report.verdict = "inconclusive"
-        seeds = ",".join(map(str, EXTEND_SEEDS))
         report.reason = (
             f"a quality rule fails on {o.discordant} discordant pairs, but the sign test "
-            f"can't separate it from chance (p = {p:.3f}): extend both variants to seeds {seeds} "
-            f"(`qwi eval --variant <name>-ext --seeds {seeds}`), then "
-            f"`qwi eval session --extend {report.session} --a <A-ext> --b <B-ext>`"
+            f"can't separate it from chance (p = {p:.3f}): {_extend_hint(report.session)}"
         )
     else:
         failed = [r for r in ("quality", "text") if not report.rules[r]]
@@ -408,6 +441,12 @@ def _rule_rows(report: Report) -> list[tuple[str, str, bool]]:
             "3c zero swap on every image",
             f"{rb.swapped_images} swapped (A {ra.swapped_images})",
             r["swap"],
+        ),
+        (
+            "4 preference: A not preferred in over half the items (extend seeds first)",
+            f"B {report.prefer['b']}, A {report.prefer['a']}, same {report.prefer['same']} "
+            f"(p = {sign_test(report.prefer['b'], report.prefer['a']):.3f})",
+            r["preference"],
         ),
     ]
 

@@ -19,6 +19,7 @@ from qwi.evaluation import load_prompts
 
 DAY = date(2026, 10, 15)
 Outcome = Callable[[str, int, str], tuple[str, str]]  # (prompt id, seed, check) -> (A, B)
+Prefer = Callable[[str, int], str]  # (prompt id, seed) -> "a" | "b" | "same" | ""
 
 
 def results(
@@ -51,7 +52,7 @@ def ties(prompt_id: str, seed: int, check: str) -> tuple[str, str]:
     return "pass", "pass"
 
 
-def judge(session: Path, outcome: Outcome = ties, prefer: str = "") -> None:
+def judge(session: Path, outcome: Outcome = ties, prefer: str | Prefer = "") -> None:
     """Fill review.csv from intended A/B results, through the manifest's random sides."""
     manifest = json.loads((session / "manifest.json").read_text())
     items = {i["item"]: i for i in manifest["items"]}
@@ -64,8 +65,10 @@ def judge(session: Path, outcome: Outcome = ties, prefer: str = "") -> None:
         if row["check"]:
             a, b = outcome(item["prompt_id"], item["seed"], row["check"])
             row[a_side], row[b_side] = a, b
-        elif prefer:
-            row["prefer"] = {"a": a_side, "b": b_side}.get(prefer, prefer)
+        else:
+            choice = prefer(item["prompt_id"], item["seed"]) if callable(prefer) else prefer
+            if choice:
+                row["prefer"] = {"a": a_side, "b": b_side}.get(choice, choice)
     with (session / "review.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=sessions.REVIEW_COLUMNS)
         writer.writeheader()
@@ -270,6 +273,63 @@ def test_better_by_preference_majority(ab: tuple[Path, Path]) -> None:
     report = sessions.compare(session)
     assert (report.verdict, report.prefer["b"]) == ("better", 24)
     assert "preference" in report.reason
+
+
+def a_preferred(n: int) -> Prefer:
+    """A preferred on the first `n` (prompt, seed) items in eval-set order, B on the rest."""
+    order = [(p.id, seed) for p in load_prompts() for seed in (1000, 1001, 1002, 1003)]
+    first = set(order[:n])
+    return lambda prompt_id, seed: "a" if (prompt_id, seed) in first else "b"
+
+
+def test_rule_4_a_preference_majority_against_b_extends_the_seeds(ab: tuple[Path, Path]) -> None:
+    # The Turbo session (§8 2026-10-18): rules 1-3 pass, A preferred 16 to 8 (p = 0.152).
+    session = new(ab)
+    judge(session, prefer=a_preferred(32))  # 2 seeds per prompt here: 16 items for A, 8 for B
+    report = sessions.compare(session)
+    assert (report.prefer["a"], report.prefer["b"]) == (16, 8)
+    assert report.rules["preference"] is False
+    assert report.verdict == "inconclusive"
+    assert "A is preferred in 16 of 24 items (p = 0.152)" in report.reason
+    assert f"--extend {session.name}" in report.reason
+
+
+def test_rule_4_also_blocks_better_by_wins(ab: tuple[Path, Path]) -> None:
+    session = new(ab)
+    judge(session, first_checks(3, "fail", "pass"), prefer="a")
+    assert sessions.compare(session).verdict == "inconclusive"
+
+
+def test_rule_4_a_tie_or_same_majority_does_not_trigger(ab: tuple[Path, Path]) -> None:
+    session = new(ab)
+    judge(session, prefer=lambda pid, seed: "a" if seed == 1000 else "b")  # 12 vs 12
+    assert sessions.compare(session).verdict == "not worse"
+    judge(session, prefer=lambda pid, seed: "a" if pid == "count" else "same")  # 2 of 24
+    report = sessions.compare(session)
+    assert (report.verdict, report.reason) == ("not worse", "passes rules 1-4")
+
+
+@pytest.mark.parametrize(
+    ("a_items", "verdict", "reason"),
+    [
+        (32, "worse", "B fails rule 4: after extending, A is preferred in 32 of 48 items"),
+        (27, "not worse", "is not significant after extending"),
+    ],
+)
+def test_rule_4_after_extending_decides_on_the_preference_sign_test(
+    ab: tuple[Path, Path], a_items: int, verdict: str, reason: str
+) -> None:
+    old = new(ab)
+    judge(old)
+    a_ext = results("baseline-ext", seeds=(1002, 1003))
+    b_ext = results("short-ext", seeds=(1002, 1003))
+    session = sessions.create([a_ext], [b_ext], seed=8, day=DAY, extend=old)
+    judge(session, prefer=a_preferred(a_items))  # all 48 items, old and new
+    report = sessions.compare(session)
+    assert report.extended
+    assert report.prefer["a"] == a_items  # 32 vs 16: p = 0.029; 27 vs 21: p = 0.471
+    assert report.verdict == verdict
+    assert reason in report.reason
 
 
 def test_a_noisy_failure_is_inconclusive_and_says_how_to_extend(ab: tuple[Path, Path]) -> None:
