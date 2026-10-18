@@ -1244,7 +1244,7 @@ wheels = [
 
 [[package]]
 name = "mflux"
-version = "0.22.0"
+version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1274,9 +1274,9 @@ dependencies = [
     { name = "transformers" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/14/eb/4b735bf57dfcf0aea6ff0ad95d81852759b76f64a0b641422d279e36b74c/mflux-0.22.0.tar.gz", hash = "sha256:8a9a9c92c47ed4a35d8e7e962ca684ef6c81c1350b943044962aa0b9cd4e5790", size = 1104393, upload-time = "2026-10-08T11:03:59.509Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/a1/fd8fee0d4d64dd2de448b28fdc9d26feada981c3ac4eee2ac8bfb54b0c8c/mflux-0.23.0.tar.gz", hash = "sha256:cefddbcb7d98fab4f4ddc1e2b706d8f616547f32c9829fdc065c3edd3db86b9a", size = 1140421, upload-time = "2026-10-16T12:20:23.667Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b3/32/0f6d908fa4c0baa2c40ef883b5d9b9519718338c82660d7444b3b9c59cb8/mflux-0.22.0-py3-none-any.whl", hash = "sha256:b3c863f1e64718f1fed657448307d00a5702870b9e8fce18c547f5a16f9851dd", size = 1487763, upload-time = "2026-10-08T11:03:57.988Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/ab/0a6be01917e696e4865959ffade1cbab8663c21c51910163655133388949/mflux-0.23.0-py3-none-any.whl", hash = "sha256:059dbcac2f921cd29df148fb8e765b55ab3dcbe94428b782c36862578942c0b0", size = 1542580, upload-time = "2026-10-16T12:20:21.397Z" },
 ]
 
 [[package]]
@@ -2361,7 +2361,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mflux", specifier = "==0.22.0" },
+    { name = "mflux", specifier = "==0.23.0" },
     { name = "mlx-lm", specifier = ">=0.32.0" },
     { name = "mlx-vlm", specifier = ">=0.7.6" },
     { name = "pillow", specifier = ">=12.3.0" },

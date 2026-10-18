@@ -12,7 +12,7 @@ Local text-to-image pipeline for Apple Silicon (M2 Max, 32 GB): Qwen3Guard → Q
   - record measurements and findings in §8 (and §2 if they correct a fact);
   - put new questions in §9;
   - if code and plan disagree, fix one of them in the same change.
-- Specs in the plan are written against **mflux 0.22.0, Streamlit 1.66.0, uv 0.12, ruff 0.17, ty 0.0.x**. If an installed version behaves differently, trust what you observe, note it in §8, and adapt.
+- Specs in the plan are written against **mflux 0.23.0, Streamlit 1.66.0, uv 0.12, ruff 0.17, ty 0.0.x**. If an installed version behaves differently, trust what you observe, note it in §8, and adapt.
 
 ## Commands
 
@@ -31,7 +31,7 @@ uv run qwi ui                              # Streamlit UI
 
 ## Hard rules
 
-- **Dependencies only via `uv add` / `uv remove`.** Never use `pip` or `uv pip install`, and never hand-edit `uv.lock`. Bump versions only with `uv version --bump …`. `mflux` stays pinned exactly (`==0.22.0`).
+- **Dependencies only via `uv add` / `uv remove`.** Never use `pip` or `uv pip install`, and never hand-edit `uv.lock`. Bump versions only with `uv version --bump …`. `mflux` stays pinned exactly (`==0.23.0`).
 - **Never download weights or run real models without asking.** That includes `hf download`, `qwi models fetch`, `mflux-generate*`, `mflux-save`, and `pytest -m slow`. Free disk is tight (about 48 GB); keep **≥ 20 GB free** after any download (§5.7). Never start a bare `--model qwen-image-2.1` run (33 GB bf16 download).
 - **Never commit weights, generated images, or `var/`.** The only images in git are `tests/fixtures/**`. Never copy third-party prompts, code, or docs unless their license is known and compatible (§5.10). Qwen's official rewrite prompt is reference-only.
 - **The runtime is torch-free and offline.** mflux declares torch, but a `[tool.uv]` override keeps it uninstalled, because transformers imports it whenever it's present. Nothing may import it (`test_dependencies.py`, `test_no_torch.py`). The runtime sets `HF_HUB_OFFLINE=1`. Load models with the pinned revisions in `models.toml`.
