@@ -7,6 +7,7 @@ context (`seed`, `step`, `est_gb`, ...). An ERROR logged with `exc_info` carries
 import json
 import logging
 import os
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -73,9 +74,15 @@ def _attach(handler: logging.Handler, lvl: int) -> None:
 
 @contextmanager
 def run_log(run: Path, verbose: bool = False) -> Generator[Path]:
-    """Write `run/run.log` for the duration of the block (one handler per run)."""
+    """Write `run/run.log` for the duration of the block (one handler per run).
+
+    Only the thread that opened it writes there: in the UI the run is on a worker thread while
+    the server thread keeps logging to the app log (§5.6).
+    """
     path = run / "run.log"
     handler = logging.FileHandler(path, encoding="utf-8")
+    thread = threading.get_ident()
+    handler.addFilter(lambda record: record.thread == thread)
     _attach(handler, level(verbose))
     try:
         yield path

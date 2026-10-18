@@ -1,4 +1,5 @@
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -67,6 +68,16 @@ def test_run_log_detaches_when_the_run_ends() -> None:
         pass
     logs.event(logging.ERROR, None, "late", "after the run")
     assert logs.read(path) == []
+
+
+def test_run_log_ignores_other_threads() -> None:
+    run = paths.new_run_dir()
+    with logs.run_log(run) as path:
+        other = threading.Thread(target=logs.event, args=(logging.INFO, None, "ui", "rerun"))
+        other.start()
+        other.join()
+        logs.event(logging.INFO, "generate", "own", "from the run's thread")
+    assert [line["event"] for line in logs.read(path)] == ["own"]
 
 
 def test_level_from_env_verbose_and_unknown(monkeypatch: pytest.MonkeyPatch) -> None:

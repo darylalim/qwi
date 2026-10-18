@@ -425,6 +425,35 @@ def test_the_lock_is_held_during_the_run_and_released_after(h: Harness) -> None:
     assert not lock.is_held()
 
 
+def test_a_worker_thread_run_is_busy_to_others_and_cancels_from_outside(h: Harness) -> None:
+    """How the UI drives it (§5.6): run on a worker, submit and cancel from another thread."""
+    cancel, denoising, resume = threading.Event(), threading.Event(), threading.Event()
+    result: list[RunRecord] = []
+
+    def on_event(event: Event) -> None:
+        if isinstance(event, DenoiseStep) and (event.candidate, event.step) == (0, 1):
+            denoising.set()
+            assert resume.wait(5)
+
+    h.on_event = on_event
+    worker = threading.Thread(target=lambda: result.append(h.run(cancel=cancel)))
+    worker.start()
+    assert denoising.wait(5)
+    assert lock.is_held()
+    with pytest.raises(PipelineBusy):
+        Harness().run()
+    cancel.set()
+    resume.set()
+    worker.join(5)
+
+    (rec,) = result
+    assert rec.status == "cancelled"
+    assert rec.candidates == []
+    assert h.stages[0].unloaded
+    assert not lock.is_held()
+    assert "run_finished" in [line["event"] for line in logs.read(run_dir(rec) / "run.log")]
+
+
 # --- Fault injection (§5.11 "Tests"): every failure path the M1 pipeline has ---------------
 
 
