@@ -33,6 +33,9 @@ class Candidate:
 class Generate:
     """Loads `QwenImage21` from a local weight snapshot and generates one candidate per seed.
 
+    `turbo` loads the snapshot with mflux's Qwen-Image-2.1-Turbo config, whose fixed 8-node
+    schedule replaces the base model's shifted linear one (§2).
+
     `callbacks` are mflux hooks (`call_in_loop`, ...) registered on load, such as a
     `memory.SwapWatchdog`. A watchdog is also checked before each seed: the VAE decode runs after
     the last step hook, so swap there stops the next seed while the decoded image is still kept.
@@ -42,10 +45,12 @@ class Generate:
         self,
         model_path: Path,
         *,
+        turbo: bool = False,
         callbacks: Sequence[object] = (),
         watchdog: memory.SwapWatchdog | None = None,
     ) -> None:
         self.model_path = model_path
+        self.turbo = turbo
         self.callbacks = [*callbacks, *([watchdog] if watchdog else [])]
         self.watchdog = watchdog
         self._model: QwenImage21 | None = None
@@ -54,7 +59,13 @@ class Generate:
         from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
         memory.configure()
-        model = QwenImage21(model_path=str(self.model_path))
+        if self.turbo:
+            from mflux.models.common.config import ModelConfig
+
+            config = ModelConfig.qwen_image_21_turbo()
+            model = QwenImage21(model_path=str(self.model_path), model_config=config)
+        else:
+            model = QwenImage21(model_path=str(self.model_path))
         for callback in self.callbacks:
             model.callbacks.register(callback)
         self._model = model
