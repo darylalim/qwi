@@ -55,15 +55,23 @@ class FakeStage:
         self.loaded = self.unloaded = False
         self.fail_at: tuple[int, BaseException] | None = None
         self.encoded: tuple[list[str], str] | None = None
+        self.injected: list[PromptEmbeds] | None = None
+        self.log: list[str] | None = None  # shared with other fakes to check load order
 
     def load(self) -> None:
         self.loaded = True
+        if self.log is not None:
+            self.log.append("image load")
 
     def encode(self, prompts: Sequence[str], encoder: str = "A-q4") -> list[PromptEmbeds]:
         import mlx.core as mx
 
         self.encoded = (list(prompts), encoder)
         return [PromptEmbeds(p, mx.zeros((1, 12, 8)), mx.ones((1, 12)), encoder) for p in prompts]
+
+    def inject(self, embeds: Sequence[PromptEmbeds]) -> None:
+        assert self.loaded, "inject() needs the loaded model"
+        self.injected = list(embeds)
 
     def __call__(
         self, prompt: str, seeds: Sequence[int], *, width: int, height: int, steps: int

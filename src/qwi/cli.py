@@ -19,7 +19,15 @@ import typer
 from qwi import bestof, errors, lock, logs, paths, record, sessions, storage
 from qwi.config import DEFAULTS
 from qwi.errors import PipelineBusy, QwiError
-from qwi.evaluation import RERANK_PRESETS, EvalRequest, EvalRunner, rescore, run_guard_allow
+from qwi.evaluation import (
+    ENCODERS,
+    RERANK_PRESETS,
+    Encoder,
+    EvalRequest,
+    EvalRunner,
+    rescore,
+    run_guard_allow,
+)
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
@@ -385,6 +393,9 @@ def eval_run(
         str | None, typer.Option(help="Comma-separated prompt ids (smoke runs).")
     ] = None,
     steps: Annotated[int, typer.Option(min=1)] = DEFAULTS.steps,
+    encoder: Annotated[
+        Encoder, typer.Option(help="A: the image pack's encoder. B: the rewrite model (§3).")
+    ] = Encoder.A,
     width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
     height: Annotated[int, typer.Option(min=16)] = DEFAULTS.height,
     guard_mode: Annotated[GuardMode, typer.Option(help="Guard policy column.")] = GUARD_MODE,
@@ -424,6 +435,7 @@ def eval_run(
         width=width,
         height=height,
         steps=steps,
+        encoder=ENCODERS[encoder],
         guard_mode=guard_mode.value,
         rewrite=not no_rewrite,
         rewrite_style=rewrite_style.value,

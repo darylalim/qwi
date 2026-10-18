@@ -19,6 +19,7 @@ from qwi.errors import EvalExists, EvalSetError
 from qwi.evaluation import EvalRequest, EvalRunner
 from qwi.events import CandidateReady, Event, GuardVerdict, StageStarted
 from qwi.stages import guard, rewrite
+from qwi.stages.encode import PromptEmbeds
 
 from .test_pipeline import (
     LIMIT,
@@ -46,6 +47,30 @@ class EchoRewrite(FakeRewrite):
     def __call__(self, prompt: str) -> rewrite.Rewritten:
         self.raw = f"A detailed picture: {prompt}"
         return super().__call__(prompt)
+
+
+class FakeEncode:
+    """Option B's encoder: one embedding per distinct prompt, tagged "B"; records the call order."""
+
+    def __init__(self, model_path: Path, log: list[str], fail: BaseException | None) -> None:
+        self.model_path = model_path
+        self.log = log
+        self.fail = fail
+        self.seen: list[str] = []
+
+    def load(self) -> None:
+        self.log.append("encode-b load")
+
+    def __call__(self, prompts: Sequence[str]) -> list[PromptEmbeds]:
+        import mlx.core as mx
+
+        if self.fail:
+            raise self.fail
+        self.seen = list(prompts)
+        return [PromptEmbeds(p, mx.zeros((1, 3, 8)), mx.ones((1, 3)), "B") for p in prompts]
+
+    def unload(self) -> None:
+        self.log.append("encode-b unload")
 
 
 class FakeOcr:
@@ -80,15 +105,23 @@ class Runner:
         self.rerankers: list[FakeRerank] = []
         self.ocr_reply = "THE DAILY\nGRIND"
         self.readers: list[FakeOcr] = []
+        self.encoders: list[FakeEncode] = []
+        self.encode_fail: BaseException | None = None
+        self.log: list[str] = []  # load order across the encode and generate stages
         self.runner = EvalRunner(
             self._make,
-            resolve=lambda role: Path("/w"),
+            resolve=lambda role: Path(f"/w/{role}"),
             startup=self.roles.extend,
             make_guard=self._guard,
             make_rewrite=self._rewrite,
             make_rerank=self._rerank,
             make_ocr=self._ocr,
+            make_encode=self._encode,
         )
+
+    def _encode(self, model_path: Path) -> FakeEncode:
+        self.encoders.append(FakeEncode(model_path, self.log, self.encode_fail))
+        return self.encoders[-1]
 
     def _ocr(self, model_path: Path) -> FakeOcr:
         self.readers.append(FakeOcr(self.ocr_reply))
@@ -108,6 +141,7 @@ class Runner:
 
     def _make(self, model_path: Path, callbacks: Sequence[object], _: object) -> FakeStage:
         stage = FakeStage(callbacks)
+        stage.log = self.log
         stage.fail_at = self.fail_at
         self.stages.append(stage)
         return stage
@@ -426,6 +460,60 @@ def test_cli_runs_the_eval_and_reports_paths(monkeypatch: pytest.MonkeyPatch) ->
         [1000, 1001],
         ["count", "isolated"],
     )
+
+
+def test_encoder_b_encodes_with_the_rewrite_model_then_injects(r: Runner) -> None:
+    result = r.run(encoder="B")
+    assert result.status == "ok"
+    (encoder,) = r.encoders
+    assert encoder.model_path == Path("/w/rewrite")
+    assert len(encoder.seen) == 12  # every rewrite, encoded once in one batch
+    assert all(e.startswith("A detailed picture: ") for e in encoder.seen)
+    # One model at a time (§4): B's encoder is gone before the image model loads.
+    assert r.log == ["encode-b load", "encode-b unload", "image load"]
+    (stage,) = r.stages
+    assert stage.encoded is None  # the pack's encoder is never run
+    assert stage.injected is not None
+    assert [e.prompt for e in stage.injected] == encoder.seen
+    assert {row["config"]["encoder"] for row in result.rows} == {"B"}
+
+
+def test_encoder_a_is_the_default_and_never_loads_option_b(r: Runner) -> None:
+    result = r.run(only=["count"])
+    assert r.encoders == []
+    assert {row["config"]["encoder"] for row in result.rows} == {"A-q4"}
+
+
+def test_encoder_b_without_rewrite_still_needs_the_rewrite_model(r: Runner) -> None:
+    result = r.run(encoder="B", rewrite=False, only=["count"])
+    assert r.roles == ["guard", "rewrite", "image", "ocr", "rerank"]  # startup checks it's cached
+    assert r.rewriters == []  # ...but nothing is rewritten
+    (encoder,) = r.encoders
+    assert encoder.seen == [result.rows[0]["prompt"]]  # the eval prompt as written
+
+
+def test_encoder_b_is_unloaded_when_encoding_fails(r: Runner) -> None:
+    r.encode_fail = RuntimeError("[metal::malloc] Resource limit exceeded")
+    result = r.run(encoder="B")
+    assert result.status == "error"
+    assert r.log == ["encode-b load", "encode-b unload"]  # the image model never loads
+    assert result.rows == []
+    assert not lock.is_held()
+
+
+def test_cli_encoder_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[EvalRequest] = []
+
+    class FakeRunner:
+        def run(self, request: EvalRequest, on_event: Any) -> evaluation.EvalResult:
+            seen.append(request)
+            return evaluation.EvalResult("d_v", Path("/r"), Path("/i"), [{}])
+
+    monkeypatch.setattr(cli, "EvalRunner", FakeRunner)
+    assert runner.invoke(cli.app, ["eval", "--variant", "a"]).exit_code == 0
+    assert runner.invoke(cli.app, ["eval", "--variant", "b", "--encoder", "B"]).exit_code == 0
+    assert runner.invoke(cli.app, ["eval", "--variant", "c", "--encoder", "C"]).exit_code == 2
+    assert [r.encoder for r in seen] == ["A-q4", "B"]
 
 
 def test_cli_passes_the_rewrite_and_guard_flags(monkeypatch: pytest.MonkeyPatch) -> None:

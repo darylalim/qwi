@@ -22,8 +22,9 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from PIL import Image as PILImage
 from PIL.Image import Image
@@ -58,6 +59,7 @@ from qwi.pipeline import (
     ignore_event,
 )
 from qwi.stages import guard, ocr, rerank
+from qwi.stages.encode import EncodeB, PromptEmbeds
 from qwi.stages.rewrite import quoted
 
 ISOLATED_WHITE = 235  # all channels ≥ this counts as near-white (§5.4 automated checks)
@@ -113,6 +115,31 @@ def white_border_share(image: Image) -> float:
     return float(white[border].mean())
 
 
+class Encoder(StrEnum):
+    """`--encoder` (§3): mflux's recipe on the image pack's encoder (A) or the rewrite model (B)."""
+
+    A = "A"
+    B = "B"
+
+
+ENCODERS = {Encoder.A: ENCODER, Encoder.B: "B"}  # → the run config's `encoder`
+
+
+class EncodeStage(Protocol):
+    def load(self) -> None: ...
+
+    def __call__(self, prompts: Sequence[str]) -> list[PromptEmbeds]: ...
+
+    def unload(self) -> None: ...
+
+
+EncodeFactory = Callable[[Path], EncodeStage]
+
+
+def default_encode_stage(model_path: Path) -> EncodeStage:
+    return EncodeB(model_path)
+
+
 def image_name(prompt_id: str, seed: int) -> str:
     return f"{prompt_id}_{seed}.png"
 
@@ -125,6 +152,7 @@ class EvalRequest:
     width: int = DEFAULTS.width
     height: int = DEFAULTS.height
     steps: int = DEFAULTS.steps
+    encoder: str = ENCODER  # "A-q4" | "B": option B encodes with the rewrite model (§3)
     guard_mode: str = DEFAULTS.guard_mode
     rewrite: bool = True  # False: --no-rewrite, generate from the eval prompts as written
     rewrite_style: str = DEFAULTS.rewrite_style
@@ -140,7 +168,8 @@ class EvalRequest:
 
     @property
     def roles(self) -> list[str]:
-        return ["guard", *(["rewrite"] if self.rewrite else []), "image", "ocr", "rerank"]
+        rewrite = ["rewrite"] if self.rewrite or self.encoder == "B" else []
+        return ["guard", *rewrite, "image", "ocr", "rerank"]
 
 
 @dataclass
@@ -176,6 +205,7 @@ class EvalRunner:
         make_rewrite: RewriteFactory = default_rewrite_stage,
         make_rerank: RerankFactory = default_rerank_stage,
         make_ocr: OcrFactory = default_ocr_stage,
+        make_encode: EncodeFactory = default_encode_stage,
     ) -> None:
         self._make_generate = make_generate
         self._resolve = resolve
@@ -184,6 +214,7 @@ class EvalRunner:
         self._make_rewrite = make_rewrite
         self._make_rerank = make_rerank
         self._make_ocr = make_ocr
+        self._make_encode = make_encode
         self._stage = "startup"
 
     def run(
@@ -359,9 +390,22 @@ class EvalRunner:
             self._stage = "encode"
             on_event(StageStarted("encode"))
             started = time.perf_counter()
+            texts = [prepared[p.id].prompt for p in prompts]
             with memory.track_peak() as peak:
-                generator.load()
-                generator.encode([prepared[p.id].prompt for p in prompts], ENCODER)
+                if request.encoder == "B":
+                    # One model at a time (§4): B's encoder is evicted before the image model
+                    # loads, whose own encoder `inject()` drops unread.
+                    encoder = self._make_encode(self._resolve("rewrite"))
+                    try:
+                        encoder.load()
+                        embeds = encoder(texts)
+                    finally:
+                        encoder.unload()
+                    generator.load()
+                    generator.inject(embeds)
+                else:
+                    generator.load()
+                    generator.encode(texts, ENCODER)
             encode_s = time.perf_counter() - started
             on_event(StageFinished("encode", encode_s, peak.gb))
             self._stage = "generate"
@@ -510,7 +554,7 @@ class EvalRunner:
                 "width": request.width,
                 "height": request.height,
                 "steps": request.steps,
-                "encoder": ENCODER,
+                "encoder": request.encoder,
                 "rewrite": request.rewrite_style if request.rewrite else "none",
                 "guard_mode": request.guard_mode,
             },
