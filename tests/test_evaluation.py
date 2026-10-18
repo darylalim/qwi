@@ -80,27 +80,15 @@ class Runner:
         self.rerankers: list[FakeRerank] = []
         self.ocr_reply = "THE DAILY\nGRIND"
         self.readers: list[FakeOcr] = []
-        self.turbo_stages: list[FakeStage] = []
-        self.resolved: list[str] = []
         self.runner = EvalRunner(
             self._make,
-            make_turbo=self._make_turbo,
-            resolve=self._resolve,
+            resolve=lambda role: Path("/w"),
             startup=self.roles.extend,
             make_guard=self._guard,
             make_rewrite=self._rewrite,
             make_rerank=self._rerank,
             make_ocr=self._ocr,
         )
-
-    def _resolve(self, role: str) -> Path:
-        self.resolved.append(role)
-        return Path(f"/w/{role}")
-
-    def _make_turbo(self, model_path: Path, callbacks: Sequence[object], _: object) -> FakeStage:
-        stage = self._make(model_path, callbacks, _)
-        self.turbo_stages.append(stage)
-        return stage
 
     def _ocr(self, model_path: Path) -> FakeOcr:
         self.readers.append(FakeOcr(self.ocr_reply))
@@ -208,7 +196,6 @@ def test_a_full_run_is_stage_batched_and_writes_results(r: Runner) -> None:
         "width": 64,
         "height": 64,
         "steps": 2,
-        "image": "base",
         "encoder": "A-q4",
         "rewrite": "long",
         "guard_mode": "default",
@@ -439,40 +426,6 @@ def test_cli_runs_the_eval_and_reports_paths(monkeypatch: pytest.MonkeyPatch) ->
         [1000, 1001],
         ["count", "isolated"],
     )
-
-
-def test_turbo_loads_the_turbo_role_and_records_it(r: Runner) -> None:
-    result = r.run(turbo=True, steps=8)
-    assert result.status == "ok"
-    assert r.roles == ["guard", "rewrite", "image-turbo", "ocr", "rerank"]
-    assert "image-turbo" in r.resolved
-    assert "image" not in r.resolved
-    assert r.turbo_stages == r.stages  # the one image model came from the Turbo factory
-    assert {(row["config"]["image"], row["config"]["steps"]) for row in result.rows} == {
-        ("turbo", 8)
-    }
-
-
-def test_the_base_model_is_recorded_as_base(r: Runner) -> None:
-    result = r.run(only=["count"])
-    assert r.turbo_stages == []
-    assert {row["config"]["image"] for row in result.rows} == {"base"}
-
-
-def test_cli_turbo_defaults_to_8_steps(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[EvalRequest] = []
-
-    class FakeRunner:
-        def run(self, request: EvalRequest, on_event: Any) -> evaluation.EvalResult:
-            seen.append(request)
-            return evaluation.EvalResult("d_v", Path("/r"), Path("/i"), [{}])
-
-    monkeypatch.setattr(cli, "EvalRunner", FakeRunner)
-    for args in (["--variant", "a"], ["--variant", "t", "--turbo"]):
-        assert runner.invoke(cli.app, ["eval", *args]).exit_code == 0
-    args = ["eval", "--variant", "t12", "--turbo", "--steps", "12"]
-    assert runner.invoke(cli.app, args).exit_code == 0
-    assert [(r.turbo, r.steps) for r in seen] == [(False, 20), (True, 8), (True, 12)]
 
 
 def test_cli_passes_the_rewrite_and_guard_flags(monkeypatch: pytest.MonkeyPatch) -> None:

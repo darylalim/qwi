@@ -384,15 +384,7 @@ def eval_run(
     only: Annotated[
         str | None, typer.Option(help="Comma-separated prompt ids (smoke runs).")
     ] = None,
-    steps: Annotated[
-        int | None,
-        typer.Option(
-            min=1, help=f"Denoising steps ({DEFAULTS.steps}; {DEFAULTS.turbo_steps} with --turbo)."
-        ),
-    ] = None,
-    turbo: Annotated[
-        bool, typer.Option("--turbo", help="The Qwen-Image-2.1-Turbo checkpoint (image-turbo).")
-    ] = False,
+    steps: Annotated[int, typer.Option(min=1)] = DEFAULTS.steps,
     width: Annotated[int, typer.Option(min=16)] = DEFAULTS.width,
     height: Annotated[int, typer.Option(min=16)] = DEFAULTS.height,
     guard_mode: Annotated[GuardMode, typer.Option(help="Guard policy column.")] = GUARD_MODE,
@@ -431,8 +423,7 @@ def eval_run(
         only=only.split(",") if only else None,
         width=width,
         height=height,
-        steps=steps if steps is not None else DEFAULTS.turbo_steps if turbo else DEFAULTS.steps,
-        turbo=turbo,
+        steps=steps,
         guard_mode=guard_mode.value,
         rewrite=not no_rewrite,
         rewrite_style=rewrite_style.value,

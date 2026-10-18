@@ -34,8 +34,3 @@ license = "apache-2.0"
 repo = "mlx-community/Qwen-Image-2.1-mflux-q4"
 revision = "746a58556820933a2df5c75887a2570f1ad200c0"
 license = "qwen-research"
-
-[roles.image-turbo]  # M4 eval variant: the 8-step distilled checkpoint, its own q4 encoder (§2, §8)
-repo = "OsaurusAI/Qwen-Image-2.1-Turbo-mflux-4bit"
-revision = "972ad82377ce1190b64256d35966108c500075df"
-license = "qwen-research"
