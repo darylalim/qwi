@@ -10,6 +10,8 @@ class Defaults:
     width: int = 768
     height: int = 768
     steps: int = 20
+    # Qwen-Image-2.1-Turbo samples 8 fixed sigma nodes; other counts interpolate them (§2).
+    turbo_steps: int = 8
     n: int = 4
     eval_seeds: tuple[int, ...] = (1000, 1001)  # §5.4: fixed for every prompt and variant
     # --guard-mode: how Controversial verdicts are handled (PLAN.md §5.2, guard_policy.toml).

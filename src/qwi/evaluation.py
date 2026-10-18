@@ -42,6 +42,7 @@ from qwi.events import (
 from qwi.lock import RunLock
 from qwi.pipeline import (
     ENCODER,
+    GenerateStage,
     GuardFactory,
     OcrFactory,
     OcrStage,
@@ -58,6 +59,7 @@ from qwi.pipeline import (
     ignore_event,
 )
 from qwi.stages import guard, ocr, rerank
+from qwi.stages.generate import Generate
 from qwi.stages.rewrite import quoted
 
 ISOLATED_WHITE = 235  # all channels ≥ this counts as near-white (§5.4 automated checks)
@@ -113,6 +115,13 @@ def white_border_share(image: Image) -> float:
     return float(white[border].mean())
 
 
+def default_turbo_stage(
+    model_path: Path, callbacks: Sequence[object], watchdog: memory.SwapWatchdog
+) -> GenerateStage:
+    """The Turbo eval variant (M4): an eval-only image model until it wins (§5.4)."""
+    return Generate(model_path, turbo=True, callbacks=callbacks, watchdog=watchdog)
+
+
 def image_name(prompt_id: str, seed: int) -> str:
     return f"{prompt_id}_{seed}.png"
 
@@ -125,6 +134,7 @@ class EvalRequest:
     width: int = DEFAULTS.width
     height: int = DEFAULTS.height
     steps: int = DEFAULTS.steps
+    turbo: bool = False  # --turbo: the [roles.image-turbo] checkpoint instead of [roles.image]
     guard_mode: str = DEFAULTS.guard_mode
     rewrite: bool = True  # False: --no-rewrite, generate from the eval prompts as written
     rewrite_style: str = DEFAULTS.rewrite_style
@@ -139,8 +149,13 @@ class EvalRequest:
         return f"{self.day.isoformat()}_{self.variant}"
 
     @property
+    def image_role(self) -> str:
+        return "image-turbo" if self.turbo else "image"
+
+    @property
     def roles(self) -> list[str]:
-        return ["guard", *(["rewrite"] if self.rewrite else []), "image", "ocr", "rerank"]
+        rewrite = ["rewrite"] if self.rewrite else []
+        return ["guard", *rewrite, self.image_role, "ocr", "rerank"]
 
 
 @dataclass
@@ -170,6 +185,7 @@ class EvalRunner:
     def __init__(
         self,
         make_generate: StageFactory = default_generate_stage,
+        make_turbo: StageFactory = default_turbo_stage,
         resolve: Callable[[str], Path] = models.resolve,
         startup: Callable[[list[str]], None] = storage.startup,
         make_guard: GuardFactory = default_guard_stage,
@@ -178,6 +194,7 @@ class EvalRunner:
         make_ocr: OcrFactory = default_ocr_stage,
     ) -> None:
         self._make_generate = make_generate
+        self._make_turbo = make_turbo
         self._resolve = resolve
         self._startup = startup
         self._make_guard = make_guard
@@ -354,7 +371,8 @@ class EvalRunner:
         check = preflight.check("generate", est)
         watchdog = memory.SwapWatchdog("generate", preflight.swap_limit_bytes(request.allow_swap))
         watchdog.start()
-        generator = self._make_generate(self._resolve("image"), [], watchdog)
+        make = self._make_turbo if request.turbo else self._make_generate
+        generator = make(self._resolve(request.image_role), [], watchdog)
         try:
             self._stage = "encode"
             on_event(StageStarted("encode"))
@@ -510,6 +528,7 @@ class EvalRunner:
                 "width": request.width,
                 "height": request.height,
                 "steps": request.steps,
+                "image": "turbo" if request.turbo else "base",
                 "encoder": ENCODER,
                 "rewrite": request.rewrite_style if request.rewrite else "none",
                 "guard_mode": request.guard_mode,
