@@ -302,8 +302,11 @@ def test_cli_creates_a_best_of_session() -> None:
     bo4()
     result = runner.invoke(cli.app, ["eval", "session", "--bo4", "2026-10-17_bo4", "--seed", "7"])
     assert result.exit_code == 0, result.output
-    assert "qwi eval review 2026-10-17_bo4" in result.output
-    manifest = json.loads((paths.EVAL_SET / "sessions/2026-10-17_bo4/manifest.json").read_text())
+    # Named for today's date (local time), so read it back rather than hard-coding a day.
+    name = result.output.split()[1].rstrip(":")
+    assert name.endswith("_bo4")
+    assert f"qwi eval review {name}" in result.output
+    manifest = json.loads((paths.EVAL_SET / "sessions" / name / "manifest.json").read_text())
     assert manifest["kind"] == "bo4"
 
 

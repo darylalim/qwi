@@ -14,4 +14,4 @@ def test_torch_is_not_installed() -> None:
 
 def test_mflux_is_pinned_exactly() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    assert "mflux==0.22.0" in project["dependencies"]
+    assert "mflux==0.23.0" in project["dependencies"]

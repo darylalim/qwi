@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import mlx.core as mx
     import mlx.nn as nn
 
-# mflux's tokenizer truncates the templated prompt here (`Qwen21WeightDefinition`, 0.22.0).
+# mflux's tokenizer truncates the templated prompt here (`Qwen21WeightDefinition`, 0.23.0).
 MAX_TOKENS = 2048
 
 
