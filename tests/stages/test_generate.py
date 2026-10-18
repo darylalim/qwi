@@ -15,7 +15,6 @@ from qwi.stages.generate import Generate
 
 MFLUX_MODULE = "mflux.models.qwen21.variants.txt2img.qwen_image_21"
 ENCODER_MODULE = "mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder"
-CONFIG_MODULE = "mflux.models.common.config"
 
 
 class FakeRegistry:
@@ -29,9 +28,8 @@ class FakeRegistry:
 class FakeQwenImage21:
     instances: ClassVar[list["FakeQwenImage21"]] = []
 
-    def __init__(self, model_path: str, model_config: str = "qwen-image-2.1") -> None:
+    def __init__(self, model_path: str) -> None:
         self.model_path = model_path
-        self.model_config = model_config
         self.callbacks = FakeRegistry()
         self.tokenizers = {"qwen21": "tokenizer"}
         self.text_encoder: object | None = "encoder"
@@ -54,12 +52,6 @@ class FakeQwenImage21:
         for callback in self.callbacks.registered:
             callback.call_in_loop(t=0)
         return SimpleNamespace(image=Image.new("RGB", (width, height)))
-
-
-class FakeModelConfig:
-    @staticmethod
-    def qwen_image_21_turbo() -> str:
-        return "qwen-image-2.1-turbo"
 
 
 class FakePromptEncoder:
@@ -90,9 +82,6 @@ def fake_mflux(monkeypatch: pytest.MonkeyPatch, mlx_calls: list[str]) -> None:
     encoder_module = ModuleType(ENCODER_MODULE)
     encoder_module.Qwen21PromptEncoder = FakePromptEncoder  # ty: ignore[unresolved-attribute]  # test fake
     monkeypatch.setitem(sys.modules, ENCODER_MODULE, encoder_module)
-    config_module = ModuleType(CONFIG_MODULE)
-    config_module.ModelConfig = FakeModelConfig  # ty: ignore[unresolved-attribute]  # test fake
-    monkeypatch.setitem(sys.modules, CONFIG_MODULE, config_module)
     FakeQwenImage21.instances = []
     for name in ("set_cache_limit", "reset_peak_memory"):
         monkeypatch.setattr(mx, name, lambda *_: None)
@@ -118,14 +107,6 @@ def test_generates_one_candidate_per_seed_in_order() -> None:
         "width": 256,
         "height": 128,
     }
-
-
-def test_turbo_loads_the_turbo_model_config() -> None:
-    Generate(Path("/weights/base")).load()
-    Generate(Path("/weights/turbo"), turbo=True).load()
-    base, turbo = FakeQwenImage21.instances
-    assert base.model_config == "qwen-image-2.1"  # mflux's default
-    assert (turbo.model_path, turbo.model_config) == ("/weights/turbo", "qwen-image-2.1-turbo")
 
 
 def test_defaults_come_from_config() -> None:
