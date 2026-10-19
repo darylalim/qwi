@@ -6,7 +6,13 @@ import subprocess
 import sys
 
 HEAVY = ["mlx", "mflux", "mlx_lm", "mlx_vlm", "streamlit", "torch"]
-UI = "qwi.ui"  # Streamlit pages; the UI entrypoint may import streamlit
+UI = "qwi.ui"
+
+
+def is_page(module: str) -> bool:
+    """Streamlit scripts (`*_app`, `app_pages/`) may import streamlit; other `qwi.ui` may not."""
+    name = module.removeprefix(f"{UI}.")
+    return module.startswith(f"{UI}.") and (name.endswith("_app") or name.startswith("app_pages"))
 
 
 def qwi_modules() -> list[str]:
@@ -14,11 +20,13 @@ def qwi_modules() -> list[str]:
 
     found = ["qwi"]
     found += [m.name for m in pkgutil.walk_packages(qwi.__path__, "qwi.")]
-    return [m for m in found if m != UI and not m.startswith(f"{UI}.")]
+    return [m for m in found if not is_page(m)]
 
 
 def test_finds_every_module() -> None:
-    assert {"qwi.memory", "qwi.record", "qwi.stages.generate"} <= set(qwi_modules())
+    found = set(qwi_modules())
+    assert {"qwi.memory", "qwi.record", "qwi.stages.generate", "qwi.ui.jobs"} <= found
+    assert "qwi.ui.review_app" not in found
 
 
 def test_qwi_modules_import_no_heavy_libraries() -> None:
