@@ -7,6 +7,8 @@ instead; pages read `snapshot()` from a polling fragment and never touch the job
 
 Only the manager is cached in Streamlit (`st.cache_resource`), never models: the pipeline still
 loads and evicts each stage itself (§4).
+
+A job is a full run (`generate`) or `rewrite_only`, the first half of rewrite-then-edit (§5.6).
 """
 
 import logging
@@ -18,16 +20,21 @@ from typing import Protocol
 
 from qwi import errors, logs
 from qwi.events import Event
-from qwi.pipeline import GenerateRequest, Pipeline
+from qwi.pipeline import GenerateRequest, Pipeline, RewriteResult
 from qwi.record import RunRecord
 
 PIPELINE_ENV = "QWI_PIPELINE"  # "fake": the scripted `FakePipeline` (tests, CI)
 FAKE_SCRIPT_ENV = "QWI_FAKE_SCRIPT"  # which `FakePipeline.scripted()` run (ok, warn, ...)
 SYNC_ENV = "QWI_JOBS_SYNC"  # "1": run jobs inside `submit()` (AppTest, §5.6 "Tests")
+KINDS = ("generate", "rewrite_only")
 
 
 class Runner(Protocol):
     def run(self, request: GenerateRequest, on_event: Callable[[Event], None]) -> RunRecord: ...
+
+    def rewrite_only(
+        self, request: GenerateRequest, on_event: Callable[[Event], None]
+    ) -> RewriteResult: ...
 
 
 def make_pipeline(kind: str | None, script: str | None = None) -> Runner:
@@ -48,10 +55,13 @@ class Busy(Exception):
 
 @dataclass
 class Job:
+    number: int  # counts this manager's jobs: tells a new result from one already shown
     request: GenerateRequest
+    kind: str = "generate"  # generate | rewrite_only
     status: str = "running"  # running, then the record's status, or `error` if run() raised
     events: list[Event] = field(default_factory=list)
     record: RunRecord | None = None  # None until the run returns, or when run() raised
+    rewrite: RewriteResult | None = None  # a finished `rewrite_only` job's result
     error_type: str | None = None  # set when run() raised instead of returning a record
     message: str | None = None
     traceback: str | None = None
@@ -61,10 +71,13 @@ class Job:
 class JobSnapshot:
     """A consistent copy of the current or last job, safe to read while the worker runs."""
 
+    number: int
     request: GenerateRequest
+    kind: str
     status: str
     events: tuple[Event, ...]
     record: RunRecord | None
+    rewrite: RewriteResult | None
     error_type: str | None
     message: str | None
     traceback: str | None
@@ -86,13 +99,17 @@ class JobManager:
         self._sync = sync
         self._lock = threading.Lock()
         self._job: Job | None = None
+        self._count = 0
         self._worker: threading.Thread | None = None
 
-    def submit(self, request: GenerateRequest) -> None:
+    def submit(self, request: GenerateRequest, kind: str = "generate") -> None:
+        if kind not in KINDS:
+            raise ValueError(f"unknown job kind {kind!r}; one of {', '.join(KINDS)}")
         with self._lock:
             if self._job is not None and self._job.status == "running":
                 raise Busy()
-            job = self._job = Job(request)
+            self._count += 1
+            job = self._job = Job(self._count, request, kind)
         if self._sync:
             self._work(job)
             return
@@ -115,10 +132,13 @@ class JobManager:
             if job is None:
                 return None
             return JobSnapshot(
+                job.number,
                 job.request,
+                job.kind,
                 job.status,
                 tuple(job.events),
                 job.record,
+                job.rewrite,
                 job.error_type,
                 job.message,
                 job.traceback,
@@ -136,8 +156,14 @@ class JobManager:
 
     def _work(self, job: Job) -> None:
         # Catches BaseException too: a job left `running` would refuse every later submit.
+        def emit(event: Event) -> None:
+            self._emit(job, event)
+
         try:
-            rec = self._pipeline.run(job.request, lambda event: self._emit(job, event))
+            if job.kind == "rewrite_only":
+                result = self._pipeline.rewrite_only(job.request, emit)
+            else:
+                rec = self._pipeline.run(job.request, emit)
         except BaseException as exc:
             text = traceback.format_exc()
             logs.exception(None, "job_error", str(exc), type=type(exc).__name__)
@@ -147,10 +173,17 @@ class JobManager:
                 job.message = str(exc)
                 job.traceback = text
             return
-        logs.event(logging.INFO, None, "job_finished", rec.status, status=rec.status)
+        if job.kind == "rewrite_only":
+            status, error = result.status, result.error
+        else:
+            status, error = rec.status, rec.error
+        logs.event(logging.INFO, None, "job_finished", status, status=status, kind=job.kind)
         with self._lock:
-            job.record = rec
-            job.status = rec.status
-            if rec.error is not None:
-                job.error_type = rec.error.get("type")
-                job.message = rec.error.get("message")
+            if job.kind == "rewrite_only":
+                job.rewrite = result
+            else:
+                job.record = rec
+            job.status = status
+            if error is not None:
+                job.error_type = error.get("type")
+                job.message = error.get("message")

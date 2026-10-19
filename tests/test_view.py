@@ -19,7 +19,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
-from qwi.pipeline import GenerateRequest
+from qwi.pipeline import GenerateRequest, RewriteResult
 from qwi.ui import view
 from qwi.ui.jobs import JobSnapshot
 
@@ -32,13 +32,17 @@ def snapshot(
     status: str = "running",
     error: BaseException | None = None,
     traceback: str | None = None,
+    job_kind: str = "generate",
+    rewrite: RewriteResult | None = None,
     **request: Any,
 ) -> JobSnapshot:
     fields: dict[str, Any] = {"prompt": "a red apple", "n": 2}
     req = GenerateRequest(**(fields | request))
     kind = type(error).__name__ if error else None
     message = str(error) if error else None
-    return JobSnapshot(req, status, tuple(events), None, kind, message, traceback)
+    return JobSnapshot(
+        1, req, job_kind, status, tuple(events), None, rewrite, kind, message, traceback
+    )
 
 
 def started(*stages: str) -> list[Event]:
@@ -199,3 +203,18 @@ def test_log_lines_show_a_traceback_under_its_line() -> None:
     assert first.endswith("ERROR    generate  boom")
     assert trace[0] == "    Traceback (most recent call last):"
     assert trace[-1] == "    RuntimeError: boom"
+
+
+def test_a_rewrite_job_memory_error_offers_no_generation_retries() -> None:
+    error = errors.DeviceOutOfMemory("rewrite", "swap")
+    snap = snapshot([], "error", error, job_kind="rewrite_only")
+    banner = view.error_banner(snap)
+    assert banner is not None
+    assert (banner.title, banner.retries) == ("Ran out of GPU memory", ())
+
+
+def test_an_unexpected_rewrite_job_error_points_at_the_app_log() -> None:
+    snap = snapshot([], "error", RuntimeError("boom"), job_kind="rewrite_only")
+    banner = view.error_banner(snap)
+    assert banner is not None
+    assert banner.body == "RuntimeError: boom. Traceback in $QWI_HOME/logs/qwi.log."

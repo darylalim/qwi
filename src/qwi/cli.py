@@ -274,6 +274,51 @@ def generate(
     raise typer.Exit(errors.exit_code_for(rec.status, error.get("type")))
 
 
+def _render_rewrite(event: Event) -> None:
+    """`qwi rewrite`'s progress, all on stderr: stdout is only the prompt (§5.6)."""
+    match event:
+        case StageStarted(stage):
+            typer.echo(f"{stage}: loading", err=True)
+        case StageFinished(stage, seconds, peak_gb):
+            typer.echo(f"{stage}: {seconds:.1f} s, peak {peak_gb:.1f} GB", err=True)
+        case RewriteReady(fallback_reason=reason) if reason:
+            typer.echo(f"rewrite not used ({reason}): printing your prompt instead", err=True)
+        case _:
+            _render(event)  # guard verdicts and swap risk already go to stderr
+
+
+@app.command()
+def rewrite(
+    prompt: Annotated[str, typer.Argument(help="What to draw.")],
+    guard_mode: Annotated[
+        GuardMode,
+        typer.Option(help="How Controversial prompts are handled. Unsafe always blocks."),
+    ] = GUARD_MODE,
+    rewrite_style: Annotated[
+        RewriteStyle, typer.Option(help="Rewriter system prompt: 40-120 or 400-500 words.")
+    ] = REWRITE_STYLE,
+) -> None:
+    """Guard and rewrite a prompt, and print it to edit before `qwi generate --no-rewrite` (§5.6).
+
+    Prints what a run would generate from: the rewrite, or your prompt on a fallback.
+    """
+    logs.app_log()
+    request = GenerateRequest(
+        prompt, guard_mode=guard_mode.value, rewrite_style=rewrite_style.value
+    )
+    try:
+        with cancel_on_signals(request.cancel):
+            result = Pipeline().rewrite_only(request, _render_rewrite)
+    except PipelineBusy as exc:
+        raise _fail(exc) from exc
+    error = result.error or {}
+    if result.status == "ok":
+        typer.echo(result.prompt)
+    elif result.status != "blocked":  # a block was already explained by its verdict
+        typer.echo(f"{result.status}: {error.get('message', '')}".rstrip(": "), err=True)
+    raise typer.Exit(errors.exit_code_for(result.status, error.get("type")))
+
+
 @app.command()
 def doctor() -> None:
     """Read-only health check: disk, models, $QWI_HOME, runs, offline mode, torch (§5.7)."""

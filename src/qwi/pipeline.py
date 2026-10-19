@@ -8,6 +8,9 @@ Stages: guard (input) → rewrite → guard (rewrite) → encode → generate �
 `--no-rewrite` skips the rewrite and the second pass, and so does `--continue-seeds`, which reuses
 its source run's prompt (`continue_seeds`). Rerank runs only once every candidate is
 saved: after a failure or a cancel the kept candidates stay unranked (§5.11).
+
+`rewrite_only()` runs just the first three stages for the rewrite-then-edit flow (§5.6): the
+user edits the rewrite, then generates from it with `prompt_source="edited_rewrite"`.
 """
 
 import logging
@@ -47,6 +50,8 @@ from qwi.stages.rewrite import Rewrite, Rewritten
 ENCODER = "A-q4"  # the q4 pack's own encoder through mflux's recipe (§3, §8)
 HISTORY_KEYS = ("width", "height", "n", "encoder")  # what pre-flight history must match (§5.11)
 ROLES = ["guard", "rewrite", "image", "rerank"]  # models a run can load
+REWRITE_ROLES = ["guard", "rewrite"]  # what `rewrite_only` loads
+PROMPT_SOURCES = ("user", "edited_rewrite")  # a request's; the pipeline sets "rewrite" itself
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,35 @@ class GenerateRequest:
     allow_swap: bool = False
     verbose: bool = False
     continuation: Continuation | None = None  # --continue-seeds: no rewrite, the source's prompt
+    # Generating from an edited rewrite (§5.6): `prompt` is the edited text, `rewrite` is off,
+    # and the reranker still scores the original request, `rerank_query` (None: the prompt).
+    rerank_query: str | None = None
+    prompt_source: str = "user"  # user | edited_rewrite
     cancel: threading.Event = field(default_factory=threading.Event)
+
+    def __post_init__(self) -> None:
+        if self.prompt_source not in PROMPT_SOURCES:
+            raise ValueError(f"prompt_source must be one of {PROMPT_SOURCES}")
+        if self.prompt_source == "edited_rewrite" and (self.rewrite or self.continuation):
+            raise ValueError("an edited rewrite is generated as given: rewrite=False")
+
+
+@dataclass(frozen=True)
+class RewriteResult:
+    """What `Pipeline.rewrite_only` returns; `status` and `error` work like `RunRecord`'s."""
+
+    user_prompt: str
+    rewritten_prompt: str  # the cleaned rewrite, also when it isn't used ("" if none ran)
+    fallback_reason: str | None  # None: a normal run would generate from the rewrite (§5.1)
+    guard: dict[str, Any]  # §5.2, as in `RunRecord.guard`
+    style: str
+    status: str  # ok | blocked | cancelled | error
+    error: dict[str, Any] | None = None  # {type, message, stage} when status == "error"
+
+    @property
+    def prompt(self) -> str:
+        """What a normal run generates from: the rewrite, or the user's prompt on a fallback."""
+        return self.user_prompt if self.fallback_reason else self.rewritten_prompt
 
 
 class GuardStage(Protocol):
@@ -202,6 +235,11 @@ def ignore_event(_: Event) -> None:
     pass
 
 
+def _save(rec: RunRecord, run: Path | None) -> None:
+    if run is not None:
+        record.write(rec, run)
+
+
 class _ProgressHook:
     """mflux step hook: emits `DenoiseStep` and cancels at the next step (§5.6)."""
 
@@ -242,6 +280,48 @@ class Pipeline:
         with RunLock():
             return self._run(request, on_event)
 
+    def rewrite_only(
+        self, request: GenerateRequest, on_event: Callable[[Event], None] = ignore_event
+    ) -> RewriteResult:
+        """Guard the input, rewrite, guard the rewrite; then evict both and release the lock (§5.6).
+
+        No run folder: nothing is generated, so it logs to the app log only. Like `run()`, it
+        returns how it ended (`status`) and raises only `PipelineBusy`.
+        """
+        with RunLock():
+            return self._rewrite_only(replace(request, rewrite=True, continuation=None), on_event)
+
+    def _rewrite_only(
+        self, request: GenerateRequest, on_event: Callable[[Event], None]
+    ) -> RewriteResult:
+        rec = RunRecord(request.prompt)  # in memory only: collects the guard and the rewrite
+        self._stage = None
+        logs.event(logging.INFO, None, "rewrite_only_started", "rewrite only")
+        try:
+            self._stage = "startup"
+            self._startup(REWRITE_ROLES)
+            self._prompt_stages(request, rec, None, on_event)
+        except (Exception, KeyboardInterrupt) as exc:
+            failure = errors.classify(exc, self._stage or "setup")
+            record.finish(rec, failure, self._stage)
+            if rec.status == "error":
+                logs.exception(self._stage, "error", str(failure), type=type(failure).__name__)
+            else:
+                logs.event(logging.WARNING, self._stage, rec.status, str(failure))
+        else:
+            record.finish(rec)
+        logs.event(logging.INFO, None, "rewrite_only_finished", rec.status, status=rec.status)
+        error = rec.error and {k: v for k, v in rec.error.items() if k != "log"}
+        return RewriteResult(
+            request.prompt,
+            rec.rewritten_prompt,
+            rec.rewrite_fallback_reason,
+            rec.guard,
+            request.rewrite_style,
+            rec.status,
+            error,
+        )
+
     def _run(self, request: GenerateRequest, on_event: Callable[[Event], None]) -> RunRecord:
         base = request.seed if request.seed is not None else random.randrange(2**31)
         seeds = [base + i for i in range(request.n)]
@@ -261,6 +341,11 @@ class Pipeline:
                 "allow_swap": request.allow_swap,
             },
         )
+        rec.rerank_query = request.rerank_query or request.prompt
+        if request.prompt_source == "edited_rewrite":  # recorded like a rewrite the user changed
+            rec.user_prompt = rec.rerank_query
+            rec.rewritten_prompt = request.prompt
+            rec.prompt_source = request.prompt_source
         if (source := request.continuation) is not None:  # the source's prompt, not a new one
             rec.continued_from = source.run_id
             rec.rewritten_prompt = source.rewritten_prompt
@@ -299,13 +384,14 @@ class Pipeline:
         self,
         request: GenerateRequest,
         rec: RunRecord,
-        run: Path,
+        run: Path | None,
         on_event: Callable[[Event], None],
     ) -> str:
         """Stages 1-2: guard the input, rewrite, guard the rewrite (§5.2, §5.1).
 
         Returns the prompt to generate from. The guard stays loaded through the rewrite for its
         second pass, then both are evicted before encoding (§4). A block raises `GuardBlocked`.
+        `run` is None for `rewrite_only`, which keeps its record in memory.
         """
         policy = guard.load_policy()  # a broken table fails before anything loads
         self._preflight(request, rec, run, on_event, "guard", preflight.STATIC_GB["guard"])
@@ -332,7 +418,7 @@ class Pipeline:
             rec.rewritten_prompt = out.text
             rec.rewrite_fallback_reason = out.fallback_reason
             rec.prompt_source = "user" if out.fallback_reason else "rewrite"
-            record.write(rec, run)
+            _save(rec, run)
             on_event(RewriteReady(out.text, out.fallback_reason, out.style))
             logs.event(
                 logging.WARNING if out.fallback_reason else logging.INFO,
@@ -354,7 +440,7 @@ class Pipeline:
     def _verdict(
         self,
         rec: RunRecord,
-        run: Path,
+        run: Path | None,
         on_event: Callable[[Event], None],
         check: str,
         verdict: guard.Verdict,
@@ -363,7 +449,7 @@ class Pipeline:
     ) -> None:
         """Record the decision so far, report this pass, and raise on a block."""
         rec.guard = result.as_record()
-        record.write(rec, run)
+        _save(rec, run)
         action, _ = guard.judge(verdict, result.mode, policy)
         summary = guard.describe_pass(check, verdict, result.mode)
         on_event(GuardVerdict(check, verdict.level, verdict.categories, action, summary))
@@ -384,7 +470,7 @@ class Pipeline:
         self,
         request: GenerateRequest,
         rec: RunRecord,
-        run: Path,
+        run: Path | None,
         on_event: Callable[[Event], None],
         stage: str,
         est: float,
@@ -393,7 +479,7 @@ class Pipeline:
         self._stage = stage
         check = preflight.check(stage, est)
         rec.preflight[stage] = check.as_record()
-        record.write(rec, run)
+        _save(rec, run)
         if check.decision == "swap_risk":
             on_event(PreflightWarning(stage, check.est_gb, check.avail_gb))
         if request.cancel.is_set():

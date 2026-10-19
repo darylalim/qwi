@@ -8,7 +8,7 @@ what a run looks like without a GPU. Cancel is checked on every step, like the r
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
@@ -28,7 +28,7 @@ from qwi.events import (
     StageStarted,
 )
 from qwi.lock import RunLock
-from qwi.pipeline import GenerateRequest
+from qwi.pipeline import GenerateRequest, RewriteResult
 from qwi.record import RunRecord
 
 COLORS = [(200, 40, 40), (40, 160, 60), (40, 70, 200), (220, 180, 30)]
@@ -80,6 +80,8 @@ class FakePipeline:
       `min_score`: the low-confidence warning).
     - `guard` is the input pass's action: allow, warn (the run continues) or block (it ends
       `blocked`).
+
+    `rewrite_only()` runs the guard and rewrite the same way and returns their `RewriteResult`.
     """
 
     def __init__(
@@ -100,7 +102,8 @@ class FakePipeline:
         self.margins = margins
         self.prob = prob
         self.guard = guard
-        self.requests: list[GenerateRequest] = []
+        self.requests: list[GenerateRequest] = []  # what run() got
+        self.rewrites: list[GenerateRequest] = []  # what rewrite_only() got
         self.evictions = 0  # stages unloaded, as the real pipeline does in `finally`
 
     @classmethod
@@ -122,11 +125,36 @@ class FakePipeline:
             self.requests.append(request)
             return self._run(request, on_event)
 
+    def rewrite_only(
+        self, request: GenerateRequest, on_event: Callable[[Event], None]
+    ) -> RewriteResult:
+        with RunLock():
+            self.rewrites.append(request)
+            rec = RunRecord(request.prompt)
+            try:
+                self._prompt(replace(request, rewrite=True), rec, on_event)
+            except GuardBlocked as exc:
+                record.finish(rec, exc, "guard")
+            else:
+                record.finish(rec)
+            return RewriteResult(
+                request.prompt,
+                rec.rewritten_prompt,
+                None,
+                {"decision": self.guard},
+                request.rewrite_style,
+                rec.status,
+            )
+
     def _run(self, request: GenerateRequest, on_event: Callable[[Event], None]) -> RunRecord:
         base = request.seed if request.seed is not None else 1000
         seeds = [base + i for i in range(request.n)]
         run = paths.new_run_dir()
         rec = RunRecord(request.prompt, seeds=seeds, config={"n": request.n, "fake": True})
+        rec.rerank_query = request.rerank_query or request.prompt
+        if request.prompt_source == "edited_rewrite":
+            rec.user_prompt, rec.rewritten_prompt = rec.rerank_query, request.prompt
+            rec.prompt_source = request.prompt_source
         with logs.run_log(run, request.verbose):
             record.write(rec, run)
             logs.event(logging.INFO, None, "run_started", "run started", run=run.name)

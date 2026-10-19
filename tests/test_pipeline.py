@@ -32,7 +32,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
-from qwi.pipeline import GenerateRequest, Pipeline, continue_seeds
+from qwi.pipeline import GenerateRequest, Pipeline, RewriteResult, continue_seeds
 from qwi.record import RunRecord
 from qwi.stages import guard, rerank, rewrite
 from qwi.stages.encode import PromptEmbeds
@@ -199,8 +199,15 @@ class Harness:
         self.on_event(event)
 
     def run(self, **overrides: Any) -> RunRecord:
-        fields: dict[str, Any] = {"n": 3, "steps": 2, "width": 64, "height": 64, "seed": 100}
-        request = GenerateRequest("a red apple", **(fields | overrides))
+        fields: dict[str, Any] = {
+            "prompt": "a red apple",
+            "n": 3,
+            "steps": 2,
+            "width": 64,
+            "height": 64,
+            "seed": 100,
+        }
+        request = GenerateRequest(**(fields | overrides))
         return self.pipeline.run(request, self._emit)
 
     def kinds(self) -> list[str]:
@@ -763,6 +770,159 @@ def test_a_rewrite_failure_is_an_error_in_the_rewrite_stage(
     assert (rec.error["type"], rec.error["stage"]) == ("DeviceOutOfMemory", "rewrite")
     assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
     assert h.stages == []
+
+
+# --- Rewrite only, then generate from the edited rewrite (§5.6) ----------------------------
+
+
+def rewrite_only(h: Harness, **overrides: Any) -> RewriteResult:
+    return h.pipeline.rewrite_only(GenerateRequest("a red apple", **overrides), h._emit)
+
+
+def test_rewrite_only_guards_rewrites_and_evicts_without_a_run(h: Harness) -> None:
+    held: list[bool] = []
+    h.on_event = lambda event: (
+        held.append(lock.is_held()) if isinstance(event, StageStarted) else None
+    )
+    startup: list[list[str]] = []
+    h.startup = startup.append
+    result = rewrite_only(h, rewrite=False, rewrite_style="short")  # the toggle doesn't apply
+
+    assert (result.status, result.error, result.style) == ("ok", None, "short")
+    assert (result.user_prompt, result.rewritten_prompt, result.fallback_reason) == (
+        "a red apple",
+        REWRITE,
+        None,
+    )
+    assert result.prompt == REWRITE
+    assert (result.guard["decision"], result.guard["rewrite"]["level"]) == ("allow", "Safe")
+    assert h.guards[0].seen == ["a red apple", REWRITE]
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
+    assert h.rewriters[0].style == "short"
+    assert (h.stages, h.rerankers) == ([], [])
+    assert startup == [["guard", "rewrite"]]
+    assert held == [True, True]
+    assert not lock.is_held()
+    assert not paths.runs_dir().exists()  # nothing generated, no run folder
+    assert h.kinds() == [
+        "StageStarted",
+        "StageFinished",
+        "GuardVerdict",
+        "StageStarted",
+        "StageFinished",
+        "RewriteReady",
+        "GuardVerdict",
+    ]
+
+
+def test_rewrite_only_on_a_fallback_offers_the_user_prompt(h: Harness) -> None:
+    h.rewrite_reply = ""
+    result = rewrite_only(h)
+    assert (result.status, result.fallback_reason, result.prompt) == ("ok", "empty", "a red apple")
+    assert result.guard["rewrite"] is None  # no second pass on a fallback
+
+
+def test_rewrite_only_blocked_on_input_never_builds_the_rewriter(h: Harness) -> None:
+    h.guard_reply = "Safety: Unsafe\nCategories: Violent"
+    result = rewrite_only(h)
+    assert (result.status, result.error, result.rewritten_prompt) == ("blocked", None, "")
+    assert result.guard["reason"] == "input:Unsafe:Violent"
+    assert h.rewriters == []
+    assert h.guards[0].unloaded
+    assert not lock.is_held()
+
+
+def test_rewrite_only_blocked_on_the_rewrite_pass(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def judge(self: FakeGuard, text: str) -> guard.Verdict:
+        return guard.parse(SAFE if text == "a red apple" else "Safety: Unsafe\nCategories: Violent")
+
+    monkeypatch.setattr(FakeGuard, "__call__", judge)
+    result = rewrite_only(h)
+    assert (result.status, result.guard["reason"]) == ("blocked", "rewrite:Unsafe:Violent")
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
+
+
+def test_rewrite_only_cancelled_before_the_rewrite(h: Harness) -> None:
+    cancel = threading.Event()
+    h.on_event = lambda event: cancel.set() if isinstance(event, GuardVerdict) else None
+    result = h.pipeline.rewrite_only(GenerateRequest("a red apple", cancel=cancel), h._emit)
+    assert result.status == "cancelled"
+    assert h.rewriters == []  # the rewrite pre-flight is the last chance to cancel
+    assert h.guards[0].unloaded
+
+
+def test_rewrite_only_failure_is_an_error_and_evicts(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: FakeRewrite, prompt: str) -> rewrite.Rewritten:
+        raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+
+    monkeypatch.setattr(FakeRewrite, "__call__", broken)
+    logs.app_log()
+    result = rewrite_only(h)
+    assert result.status == "error"
+    assert result.error is not None
+    assert (result.error["type"], result.error["stage"]) == ("DeviceOutOfMemory", "rewrite")
+    assert "log" not in result.error  # no run.log: it's in the app log
+    assert (h.guards[0].unloaded, h.rewriters[0].unloaded) == (True, True)
+    assert not lock.is_held()
+    (line,) = [x for x in logs.read(paths.logs_dir() / "qwi.log") if x["level"] == "ERROR"]
+    assert line["stage"] == "rewrite"
+
+
+def test_rewrite_only_while_a_run_holds_the_lock_is_busy(h: Harness) -> None:
+    with lock.RunLock(), pytest.raises(PipelineBusy):
+        rewrite_only(h)
+    assert h.guards == []
+
+
+EDITED = "A glossy green apple on a slate table"
+
+
+def test_an_edited_rewrite_generates_as_given_and_reranks_against_the_original(
+    h: Harness,
+) -> None:
+    rec = h.run(
+        prompt=EDITED, rewrite=False, rerank_query="a red apple", prompt_source="edited_rewrite"
+    )
+    assert rec.status == "ok"
+    assert h.guards[0].seen == [EDITED]  # the input pass checks the edited text
+    assert h.rewriters == []
+    assert h.stages[0].encoded == ([EDITED], "A-q4")
+    assert h.rerankers[0].seen == [("a red apple", (64, 64))] * 3
+    assert (rec.user_prompt, rec.rewritten_prompt, rec.prompt_source, rec.rerank_query) == (
+        "a red apple",
+        EDITED,
+        "edited_rewrite",
+        "a red apple",
+    )
+    assert rec.config["rewrite"] == "none"
+    assert record.read(run_dir(rec)) == rec
+
+
+def test_rerank_query_defaults_to_the_prompt(h: Harness) -> None:
+    rec = h.run(rewrite=False, rerank_query=None)
+    assert (rec.prompt_source, rec.rerank_query) == ("user", "a red apple")
+
+
+def test_continue_seeds_of_an_edited_rewrite_keeps_the_edit(h: Harness) -> None:
+    h.run(prompt=EDITED, rewrite=False, rerank_query="a red apple", prompt_source="edited_rewrite")
+    rec = h.pipeline.run(continue_seeds(last_run(h), GenerateRequest("")), h._emit)
+    assert h.stages[-1].encoded == ([EDITED], "A-q4")
+    assert h.rerankers[-1].seen[0][0] == "a red apple"
+    assert (rec.user_prompt, rec.prompt_source) == ("a red apple", "edited_rewrite")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"prompt_source": "rewrite"}, {"prompt_source": "edited_rewrite"}],
+    ids=["unknown-source", "edited-with-rewrite-on"],
+)
+def test_a_request_refuses_an_inconsistent_prompt_source(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"prompt_source|rewrite=False"):
+        GenerateRequest("p", **overrides)
 
 
 # --- Rerank (§5.3): score every candidate against the user's prompt, link best.png ----------

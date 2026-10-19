@@ -21,6 +21,7 @@ from qwi.events import (
     StageFinished,
     StageStarted,
 )
+from qwi.pipeline import RewriteResult
 from qwi.record import RunRecord
 
 runner = CliRunner()
@@ -508,3 +509,94 @@ def test_runs_show_names_the_source_of_a_continued_run() -> None:
     result = runner.invoke(cli.app, ["runs", "show", run.name])
     assert result.exit_code == 0, result.output
     assert "continue from 20261017-090000-abcdef: its prompt, no new rewrite" in result.output
+
+
+class RewriteOnly:
+    """`Pipeline.rewrite_only` stand-in: emits a stage and the rewrite, returns the result."""
+
+    def __init__(self, status: str = "ok", fallback: str | None = None, **error: str) -> None:
+        self.status, self.fallback, self.error = status, fallback, error or None
+        self.requests: list = []
+
+    def __call__(self) -> "RewriteOnly":
+        return self
+
+    def rewrite_only(self, request, on_event) -> RewriteResult:
+        self.requests.append(request)
+        on_event(StageStarted("rewrite"))
+        on_event(StageFinished("rewrite", 4.2, 6.1))
+        on_event(RewriteReady("A glossy red apple on an oak table.", self.fallback, "long"))
+        return RewriteResult(
+            request.prompt,
+            "A glossy red apple on an oak table.",
+            self.fallback,
+            {},
+            request.rewrite_style,
+            self.status,
+            self.error,
+        )
+
+
+def test_rewrite_prints_only_the_prompt_on_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = RewriteOnly()
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    result = runner.invoke(cli.app, ["rewrite", "a red apple"])
+    assert result.exit_code == 0
+    assert result.stdout == "A glossy red apple on an oak table.\n"
+    assert "rewrite: 4.2 s, peak 6.1 GB" in result.stderr
+    (request,) = fake.requests
+    assert (request.prompt, request.guard_mode, request.rewrite_style) == (
+        "a red apple",
+        DEFAULTS.guard_mode,
+        DEFAULTS.rewrite_style,
+    )
+
+
+def test_rewrite_flags_reach_the_rewrite_only_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = RewriteOnly()
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    args = ["rewrite", "p", "--guard-mode", "strict", "--rewrite-style", "short"]
+    assert runner.invoke(cli.app, args).exit_code == 0
+    assert [(r.guard_mode, r.rewrite_style) for r in fake.requests] == [("strict", "short")]
+
+
+def test_rewrite_on_a_fallback_prints_the_user_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Pipeline", RewriteOnly(fallback="empty"))
+    result = runner.invoke(cli.app, ["rewrite", "a red apple"])
+    assert (result.exit_code, result.stdout) == (0, "a red apple\n")
+    assert "rewrite not used (empty): printing your prompt instead" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("fake", "code", "stderr"),
+    [
+        (RewriteOnly("blocked"), 2, ""),
+        (RewriteOnly("cancelled"), 130, "cancelled"),
+        (
+            RewriteOnly("error", type="DeviceOutOfMemory", message="Ran out of GPU memory"),
+            4,
+            "error: Ran out of GPU memory",
+        ),
+    ],
+    ids=["blocked", "cancelled", "error"],
+)
+def test_rewrite_exit_codes_follow_the_result(
+    fake: RewriteOnly, code: int, stderr: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "Pipeline", fake)
+    result = runner.invoke(cli.app, ["rewrite", "p"])
+    assert (result.exit_code, result.stdout) == (code, "")
+    assert stderr in result.stderr
+
+
+def test_rewrite_reports_busy_with_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwi.errors import PipelineBusy
+
+    class Busy:
+        def rewrite_only(self, request, on_event) -> None:
+            raise PipelineBusy()
+
+    monkeypatch.setattr(cli, "Pipeline", Busy)
+    result = runner.invoke(cli.app, ["rewrite", "p"])
+    assert result.exit_code == 3
+    assert "Another run is in progress" in result.stderr
