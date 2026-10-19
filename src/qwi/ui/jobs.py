@@ -18,12 +18,25 @@ from typing import Protocol
 
 from qwi import errors, logs
 from qwi.events import Event
-from qwi.pipeline import GenerateRequest
+from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
+
+PIPELINE_ENV = "QWI_PIPELINE"  # "fake": the scripted `FakePipeline` (tests, CI)
+FAKE_SCRIPT_ENV = "QWI_FAKE_SCRIPT"  # which `FakePipeline.scripted()` run: ok, warn, block, low
+SYNC_ENV = "QWI_JOBS_SYNC"  # "1": run jobs inside `submit()` (AppTest, §5.6 "Tests")
 
 
 class Runner(Protocol):
     def run(self, request: GenerateRequest, on_event: Callable[[Event], None]) -> RunRecord: ...
+
+
+def make_pipeline(kind: str | None, script: str | None = None) -> Runner:
+    """The real `Pipeline`, or the scripted fake when `kind` is "fake" (`QWI_PIPELINE`)."""
+    if kind == "fake":
+        from qwi.ui.fake import FakePipeline
+
+        return FakePipeline.scripted(script or "ok")
+    return Pipeline()
 
 
 class Busy(Exception):
