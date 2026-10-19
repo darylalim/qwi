@@ -1,4 +1,5 @@
-"""Storage checks and the one download path (PLAN.md §5.7): `qwi doctor`, `qwi models fetch`.
+"""Storage checks, retention and the one download path (PLAN.md §5.7): `qwi doctor`,
+`qwi runs prune`, `qwi models fetch`.
 
 `doctor()` is read-only and returns pass/warn/fail rows. `startup()` is the cheap subset that
 `Pipeline.run` calls before anything loads, raising instead of reporting (§5.11).
@@ -8,15 +9,18 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from qwi import logs, models, paths
 from qwi.config import DEFAULTS
 from qwi.errors import InsufficientDisk, ModelUnavailable, RunNotFound
+from qwi.lock import RunLock
 from qwi.record import RUN_JSON, RunRecord
 
 RUNS_WARN_BYTES = 2 * 10**9  # §5.7 "Retention"
@@ -80,6 +84,101 @@ def find_run(run_id: str) -> Path:
     if len(matches) != 1:
         raise RunNotFound(run_id, matches)
     return runs / matches[0]
+
+
+@dataclass(frozen=True)
+class Prunable:
+    path: Path
+    started: datetime
+    starred: bool = False
+
+
+@dataclass
+class PruneResult:
+    removed: list[tuple[str, int]] = field(default_factory=list)  # (folder name, bytes)
+    kept_starred: list[str] = field(default_factory=list)  # old enough, but starred
+
+
+def prune_targets(
+    items: list[Prunable], *, keep_days: int | None, keep_last: int | None, now: datetime
+) -> tuple[list[Prunable], list[Prunable]]:
+    """(to remove, starred ones spared) among `items`, which are newest first.
+
+    `keep_last` keeps the newest N (starred ones count toward N); `keep_days` keeps anything
+    started within the last N days. Exactly one is given.
+    """
+    if (keep_days is None) == (keep_last is None):
+        raise ValueError("give exactly one of keep_days, keep_last")
+    if keep_last is not None:
+        old = items[keep_last:]
+    else:
+        cutoff = now - timedelta(days=keep_days or 0)
+        old = [item for item in items if item.started < cutoff]
+    return [i for i in old if not i.starred], [i for i in old if i.starred]
+
+
+def _run_items() -> list[Prunable]:
+    return [
+        Prunable(run, datetime.fromisoformat(rec.started_at), rec.starred)
+        for run, rec in run_records()
+    ]
+
+
+def _eval_items() -> list[Prunable]:
+    """`$QWI_HOME/eval/<date>_<variant>/` folders, newest first; ones without a date are kept."""
+    items = []
+    root = paths.eval_dir()
+    for folder in root.iterdir() if root.exists() else ():
+        try:
+            day = datetime.fromisoformat(folder.name[:10]).astimezone()
+        except ValueError:
+            continue
+        if folder.is_dir():
+            items.append((day, folder.stat().st_mtime, Prunable(folder, day)))
+    return [item for *_, item in sorted(items, key=lambda t: t[:2], reverse=True)]
+
+
+def _remove_run(run: Path) -> None:
+    """Delete `run.json` last, so an interrupted prune leaves a run the next prune still sees."""
+    for child in run.iterdir():
+        if child.name == RUN_JSON:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    shutil.rmtree(run)
+
+
+def prune(
+    *,
+    keep_days: int | None = None,
+    keep_last: int | None = None,
+    eval_images: bool = False,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> PruneResult:
+    """Delete old run folders, or with `eval_images` old eval image folders (§5.7 "Retention").
+
+    Holds the run lock (raising `PipelineBusy`), so nothing is deleted under a live run and every
+    `running` record found is one whose process is gone. Starred runs are never deleted.
+    """
+    now = now or datetime.now().astimezone()
+    result = PruneResult()
+    with RunLock():
+        items = _eval_items() if eval_images else _run_items()
+        remove, spared = prune_targets(items, keep_days=keep_days, keep_last=keep_last, now=now)
+        result.kept_starred = [item.path.name for item in spared]
+        for item in remove:
+            size = tree_bytes(item.path)
+            if not dry_run:
+                if eval_images:
+                    shutil.rmtree(item.path)
+                else:
+                    _remove_run(item.path)
+                logs.event(logging.INFO, None, "prune", "removed", path=item.path, bytes=size)
+            result.removed.append((item.path.name, size))
+    return result
 
 
 def check_disk() -> Check:

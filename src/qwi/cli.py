@@ -424,6 +424,85 @@ def runs_show(
             _show_log_line(line)
 
 
+def _mb(n: int) -> str:
+    return f"{n / 1e6:.1f} MB"
+
+
+def _clip(text: str, width: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+@runs_app.command("list")
+def runs_list() -> None:
+    """Runs, newest first: id, date, status, star, size and prompt (§5.7 "Retention")."""
+    held = lock.is_held()
+    rows = []
+    for run, _ in storage.run_records():
+        rec = record.repair_if_interrupted(run, lock_held=held)
+        started = rec.started_at[:16].replace("T", " ")
+        star = "*" if rec.starred else " "
+        size = _mb(storage.tree_bytes(run))
+        rows.append((run.name, started, rec.status, star, size, _clip(rec.user_prompt)))
+    if not rows:
+        typer.echo("(no runs)")
+        return
+    widths = [max(len(row[i]) for row in rows) for i in range(5)]
+    for row in rows:
+        cells = [row[0].ljust(widths[0]), row[1].ljust(widths[1]), row[2].ljust(widths[2])]
+        typer.echo("  ".join([*cells, row[3], row[4].rjust(widths[4]), row[5]]))
+
+
+@runs_app.command("star")
+def runs_star(
+    run_id: Annotated[str, typer.Argument(help="Run folder name, or a unique prefix of it.")],
+) -> None:
+    """Toggle a run's star; `qwi runs prune` never deletes a starred run (§5.7)."""
+    try:
+        run = storage.find_run(run_id)
+        rec = record.repair_if_interrupted(run, lock_held=lock.is_held())
+        rec = record.set_starred(run, not rec.starred)
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"{'starred' if rec.starred else 'unstarred'} {run.name}")
+
+
+@runs_app.command("prune")
+def runs_prune(
+    keep_days: Annotated[
+        int | None, typer.Option(min=0, help="Keep runs started in the last N days.")
+    ] = None,
+    keep_last: Annotated[int | None, typer.Option(min=0, help="Keep the newest N runs.")] = None,
+    eval_images: Annotated[
+        bool,
+        typer.Option("--eval", help="Prune eval image folders ($QWI_HOME/eval) instead of runs."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Only list what would be deleted.")
+    ] = False,
+) -> None:
+    """Delete old run folders (or eval image folders); starred runs are never deleted (§5.7)."""
+    if (keep_days is None) == (keep_last is None):
+        raise typer.BadParameter(
+            "give exactly one of --keep-days, --keep-last", param_hint="--keep-days/--keep-last"
+        )
+    logs.app_log()
+    try:
+        result = storage.prune(
+            keep_days=keep_days, keep_last=keep_last, eval_images=eval_images, dry_run=dry_run
+        )
+    except QwiError as exc:
+        raise _fail(exc) from exc
+    verb = "would remove" if dry_run else "removed"
+    for name, size in result.removed:
+        typer.echo(f"{verb}  {name}  {_mb(size)}")
+    for name in result.kept_starred:
+        typer.echo(f"kept (starred)  {name}")
+    what = "eval folders" if eval_images else "runs"
+    total = _mb(sum(size for _, size in result.removed))
+    typer.echo(f"{verb} {len(result.removed)} {what} ({total})")
+
+
 @eval_app.callback(invoke_without_command=True)
 def eval_run(
     ctx: typer.Context,

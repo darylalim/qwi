@@ -657,3 +657,74 @@ def test_ui_without_the_ui_extra_says_how_to_install_it(monkeypatch: pytest.Monk
 def test_ui_exits_with_streamlits_code(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 3)
     assert runner.invoke(cli.app, ["ui"]).exit_code == 3
+
+
+def test_runs_list_shows_date_status_star_size_and_prompt() -> None:
+    _saved_run(
+        "20261015-093005-abcdef", status="ok", starred=True, started_at="2026-10-15T09:30:05+08:00"
+    )
+    _saved_run("20261016-100000-123456", status="error", started_at="2026-10-16T10:00:00+08:00")
+    result = runner.invoke(cli.app, ["runs", "list"])
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    assert [line.split()[0] for line in lines] == [
+        "20261016-100000-123456",
+        "20261015-093005-abcdef",
+    ]
+    assert re.search(r"2026-10-15 09:30  ok\s+\*\s+0\.0 MB  a red apple$", lines[1])
+    assert re.search(r"2026-10-16 10:00  error\s+0\.0 MB  a red apple$", lines[0])
+
+
+def test_runs_list_repairs_an_interrupted_run_and_handles_none() -> None:
+    assert runner.invoke(cli.app, ["runs", "list"]).output == "(no runs)\n"
+    _saved_run("20261015-093005-abcdef")  # running, and no process holds the lock
+    assert " interrupted " in runner.invoke(cli.app, ["runs", "list"]).output
+
+
+def test_runs_star_toggles_the_flag() -> None:
+    run = _saved_run("20261015-093005-abcdef", status="ok")
+    first = runner.invoke(cli.app, ["runs", "star", "20261015"])
+    assert (first.exit_code, first.output) == (0, "starred 20261015-093005-abcdef\n")
+    assert record.read(run).starred
+    second = runner.invoke(cli.app, ["runs", "star", "20261015"])
+    assert second.output == "unstarred 20261015-093005-abcdef\n"
+    assert not record.read(run).starred
+
+
+def test_runs_star_unknown_run_exits_1() -> None:
+    result = runner.invoke(cli.app, ["runs", "star", "nope"])
+    assert (result.exit_code, "Run 'nope'" in result.output) == (1, True)
+
+
+def test_runs_prune_spares_starred_runs_and_reports() -> None:
+    _saved_run("20261001-090000-aaaaaa", status="ok", started_at="2026-10-01T09:00:00+08:00")
+    _saved_run("20261002-090000-bbbbbb", status="ok", starred=True)
+    result = runner.invoke(cli.app, ["runs", "prune", "--keep-last", "0", "--dry-run"])
+    assert result.exit_code == 0
+    assert re.search(r"^would remove  20261001-090000-aaaaaa  \d+\.\d MB$", result.output, re.M)
+    assert "kept (starred)  20261002-090000-bbbbbb" in result.output
+    assert result.output.splitlines()[-1].startswith("would remove 1 runs (")
+    assert len(storage.list_runs()) == 2
+    runner.invoke(cli.app, ["runs", "prune", "--keep-last", "0"])
+    assert [r.starred for r in storage.list_runs()] == [True]
+
+
+def test_runs_prune_eval_removes_image_folders() -> None:
+    (paths.eval_dir() / "2020-01-01_baseline").mkdir(parents=True)
+    result = runner.invoke(cli.app, ["runs", "prune", "--eval", "--keep-days", "30"])
+    assert result.exit_code == 0
+    assert "removed 1 eval folders" in result.output
+    assert not (paths.eval_dir() / "2020-01-01_baseline").exists()
+
+
+@pytest.mark.parametrize("args", [[], ["--keep-days", "1", "--keep-last", "1"]])
+def test_runs_prune_needs_exactly_one_rule(args: list[str]) -> None:
+    assert runner.invoke(cli.app, ["runs", "prune", *args]).exit_code == 2
+
+
+def test_runs_prune_while_a_run_holds_the_lock_exits_3() -> None:
+    from qwi.lock import RunLock
+
+    with RunLock():
+        result = runner.invoke(cli.app, ["runs", "prune", "--keep-last", "0"])
+    assert (result.exit_code, "Another run is in progress" in result.output) == (3, True)
