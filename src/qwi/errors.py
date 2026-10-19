@@ -134,6 +134,16 @@ class RunNotContinuable(QwiError):
         self.run_id = run_id
 
 
+class RunStillRunning(QwiError):
+    """A star change names a run that is still `running`: the run's next write would drop it."""
+
+    status = None
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"Run {run_id!r} is still running; star it when it ends.")
+        self.run_id = run_id
+
+
 class EvalSetError(QwiError):
     """`eval/prompts.jsonl` is malformed, or `qwi eval --only` names an unknown prompt id."""
 

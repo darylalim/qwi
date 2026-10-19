@@ -49,19 +49,26 @@ def tree_bytes(root: Path) -> int:
     return total
 
 
-def list_runs(runs: Path | None = None) -> list[RunRecord]:
-    """Every readable `run.json`, newest first; logs the scan time (§5.7 "Measure, don't guess")."""
+def run_records(runs: Path | None = None) -> list[tuple[Path, RunRecord]]:
+    """Every readable `run.json` with its run folder, newest first; logs the scan time (§5.7
+    "Measure, don't guess")."""
     runs = runs or paths.runs_dir()
     started = time.perf_counter()
-    records: list[RunRecord] = []
+    found: list[tuple[Path, RunRecord]] = []
     for path in sorted(runs.glob(f"*/{RUN_JSON}"), reverse=True):
         try:
-            records.append(RunRecord.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            found.append((path.parent, RunRecord.from_dict(data)))
         except (OSError, ValueError, TypeError):
             continue
     seconds = time.perf_counter() - started
-    logs.event(logging.DEBUG, None, "runs_scan", "scanned runs", runs=len(records), seconds=seconds)
-    return records
+    logs.event(logging.DEBUG, None, "runs_scan", "scanned runs", runs=len(found), seconds=seconds)
+    return found
+
+
+def list_runs(runs: Path | None = None) -> list[RunRecord]:
+    """Every readable `run.json`, newest first."""
+    return [rec for _, rec in run_records(runs)]
 
 
 def find_run(run_id: str) -> Path:

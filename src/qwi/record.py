@@ -119,3 +119,17 @@ def repair_if_interrupted(run: Path, lock_held: bool) -> RunRecord:
         record.status = "interrupted"
         write(record, run)
     return record
+
+
+def set_starred(run: Path, starred: bool) -> RunRecord:
+    """Star or unstar a finished run (§5.7 "Retention": prune never deletes a starred run).
+
+    Only for runs that aren't `running`: a live run rewrites `run.json` from its own copy of the
+    record at each stage boundary, which would drop the star.
+    """
+    rec = read(run)
+    if rec.status == "running":
+        raise errors.RunStillRunning(run.name)
+    rec.starred = starred
+    write(rec, run)
+    return rec
