@@ -1,4 +1,4 @@
-# Streamlit settings for `qwi ui` and `qwi eval review` (PLAN.md §5.6). Theme sections come in M5c.
+# Streamlit settings for `qwi ui` and `qwi eval review` (PLAN.md §5.6). Theme: "Neutral gallery".
 
 [server]
 address = "localhost"     # never expose on the LAN: it's a local, single-user tool
@@ -7,3 +7,74 @@ runOnSave = false
 
 [browser]
 gatherUsageStats = false
+
+[theme]                                   # shared by both modes
+font = "sans-serif"                       # Streamlit's bundled font, no network
+codeFont = "monospace"
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#4F46E5"
+backgroundColor = "#FAFAFA"
+secondaryBackgroundColor = "#EFEFF2"
+textColor = "#18181B"
+borderColor = "#D4D4DA"
+linkColor = "#4338CA"
+codeBackgroundColor = "#EFEFF2"
+grayColor = "#5B5B66"
+redColor = "#C42B2B"
+orangeColor = "#C2410C"
+yellowColor = "#A16207"
+greenColor = "#15803D"
+blueColor = "#1D5BD8"
+violetColor = "#7C3AED"
+dataframeBorderColor = "#D4D4DA"
+dataframeHeaderBackgroundColor = "#EFEFF2"
+dataframeHeaderTextColor = "#18181B"
+chartCategoricalColors = ["#4F46E5", "#15803D", "#C2410C", "#7C3AED", "#0E7490", "#BE185D", "#5B5B66"]
+chartSequentialColors = ["#EEF0FF", "#DCDFFE", "#C2C6FC", "#A3A7F8", "#8582F2", "#6A63EA", "#5149DC", "#4238C2", "#36309B", "#2A2675"]
+chartDivergingColors = ["#8F1D1D", "#B42828", "#D45B5B", "#EBA0A0", "#F6D5D5", "#D9DBFB", "#A9ADF5", "#7A78EA", "#5149DC", "#2E2A8F"]
+
+[theme.dark]
+primaryColor = "#5B54E8"
+backgroundColor = "#121215"
+secondaryBackgroundColor = "#1C1C21"
+textColor = "#E8E8EC"
+borderColor = "#34343C"
+linkColor = "#A9A6FF"
+codeBackgroundColor = "#1C1C21"
+grayColor = "#A3A3AE"
+redColor = "#F26B6B"
+orangeColor = "#FB8C4A"
+yellowColor = "#E8B10E"
+greenColor = "#4ADE80"
+blueColor = "#60A0FA"
+violetColor = "#B794F6"
+dataframeBorderColor = "#34343C"
+dataframeHeaderBackgroundColor = "#1C1C21"
+dataframeHeaderTextColor = "#E8E8EC"
+chartCategoricalColors = ["#8B87F5", "#4ADE80", "#FB8C4A", "#B794F6", "#22D3EE", "#F472B6", "#A3A3AE"]
+chartSequentialColors = ["#1E1D3A", "#25244D", "#2E2C63", "#38357C", "#443F98", "#5249B5", "#6460D0", "#7E7CE6", "#A1A1F4", "#C7C8FC"]
+chartDivergingColors = ["#F9B4B4", "#F28A8A", "#E55F5F", "#B83A3A", "#5C2626", "#2B2A55", "#3F3C8F", "#5B54E8", "#8B87F5", "#C2C3FB"]
+
+[theme.light.sidebar]                     # full set: Streamlit recommends complete sidebar contrast sets
+backgroundColor = "#F2F2F5"
+secondaryBackgroundColor = "#E6E6EB"
+codeBackgroundColor = "#E6E6EB"
+textColor = "#18181B"
+borderColor = "#D4D4DA"
+primaryColor = "#4F46E5"
+linkColor = "#4338CA"
+
+[theme.dark.sidebar]
+backgroundColor = "#0C0C0F"
+secondaryBackgroundColor = "#1C1C21"
+codeBackgroundColor = "#1C1C21"
+textColor = "#E8E8EC"
+borderColor = "#34343C"
+primaryColor = "#5B54E8"
+linkColor = "#A9A6FF"
