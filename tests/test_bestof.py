@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 from PIL import Image
-from streamlit.testing.v1 import AppTest
 from typer.testing import CliRunner
 
 from qwi import bestof, cli, evaluation, paths, sessions
@@ -19,7 +18,7 @@ from qwi.evaluation import load_prompts
 
 from .test_review import variant as paired_variant
 
-APP = str(Path(cli.__file__).parent / "ui" / "bestof_app.py")
+APP = str(Path(cli.__file__).parent / "ui" / "streamlit_app.py")
 DAY = date(2026, 10, 17)
 SEEDS = (2000, 2001, 2002, 2003)
 COLORS = {2000: (255, 0, 0), 2001: (0, 255, 0), 2002: (0, 0, 255), 2003: (255, 255, 0)}
@@ -187,112 +186,6 @@ def test_paired_and_best_of_sessions_refuse_each_other(session: Path) -> None:
         bestof.open_session(paired)
 
 
-# --- The page (AppTest) --------------------------------------------------------------------
-
-
-def app(session: Path, monkeypatch: pytest.MonkeyPatch) -> AppTest:
-    monkeypatch.setenv(sessions.REVIEW_SESSION_ENV, str(session))
-    at = AppTest.from_file(APP, default_timeout=10).run()
-    assert not at.exception
-    return at
-
-
-def texts(at: AppTest) -> str:
-    parts = [m.value for m in at.markdown] + [c.value for c in at.caption]
-    return "\n".join(str(p) for p in parts)
-
-
-def fill(at: AppTest, item: bestof.BestOfItem, marks: dict[int, str], best: int | None) -> None:
-    for n, mark in marks.items():
-        at.segmented_control(key=f"{item.item}-{n}-acceptable").set_value(mark)
-    at.segmented_control(key=f"{item.item}-best").set_value(best)
-
-
-def test_the_first_prompt_shows_its_candidates_and_nothing_else(
-    session: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = app(session, monkeypatch)
-    review = bestof.open_session(session)
-    item = review.items[0]
-    prompt = review.prompts[item.prompt_id]
-    assert "Prompt 1 of 12" in texts(at)
-    assert f"**Prompt:** {prompt}" in texts(at)
-    assert [img.proto.imgs[0].alt for img in at.image] == [
-        f"Candidate {n}: {prompt}" for n in item.candidates
-    ]
-    assert [h.value for h in at.subheader] == [f"Candidate {n}" for n in item.candidates]
-    assert len(at.segmented_control) == 4 + 1  # acceptable per candidate, then best
-    shown = texts(at)
-    assert not any(str(s) in shown for s in SEEDS)  # no seeds ...
-    assert "0.9" not in shown  # ... and no reranker scores
-    assert at.progress[0].value == 0
-
-
-def test_an_incomplete_save_is_refused(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    at = app(session, monkeypatch)
-    item = bestof.open_session(session).items[0]
-    before = (session / "review.csv").read_text()
-    fill(at, item, {1: "yes", 2: "no"}, 1)
-    at.form_submit_button[0].click().run()
-    assert at.warning[0].value == "Mark every candidate acceptable or not."
-    assert (session / "review.csv").read_text() == before
-
-
-def test_the_best_must_be_acceptable_when_any_is(
-    session: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = app(session, monkeypatch)
-    item = bestof.open_session(session).items[0]
-    fill(at, item, {1: "yes", 2: "no", 3: "no", 4: "no"}, 2)
-    at.form_submit_button[0].click().run()
-    assert at.warning[0].value == "The best candidate must be an acceptable one, when any is."
-
-
-def test_save_writes_review_csv_and_marks_the_prompt_saved(
-    session: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = app(session, monkeypatch)
-    item = bestof.open_session(session).items[0]
-    fill(at, item, {1: "no", 2: "yes", 3: "yes", 4: "no"}, 3)
-    at.text_input(key=f"{item.item}-notes").set_value("crisp apples")
-    at.form_submit_button[0].click().run()
-    assert not at.exception
-    assert bestof.read_judgments(session)[item.item] == BestOfJudgment(
-        {1: "no", 2: "yes", 3: "yes", 4: "no"}, 3, "crisp apples"
-    )
-    assert ":green-badge[:material/check: Saved]" in texts(at)
-    assert at.progress[0].value == round(100 / 12)
-
-
-def test_reopening_starts_at_the_first_unjudged_prompt(
-    session: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    first = bestof.open_session(session).items[0]
-    bestof.save_judgment(session, first, complete(first))
-    at = app(session, monkeypatch)
-    assert "Prompt 2 of 12" in texts(at)
-
-
-def test_paging_stays_within_bounds(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    at = app(session, monkeypatch)
-    for _ in range(11):
-        at.button(key="next").click().run()
-    assert "Prompt 12 of 12" in texts(at)
-    assert at.button(key="next").disabled
-    at.button(key="previous").click().run()
-    assert "Prompt 11 of 12" in texts(at)
-
-
-def test_a_paired_session_shows_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    paired = sessions.create(
-        [paired_variant("alpha")], [paired_variant("beta")], seed=7, day=date(2026, 10, 15)
-    )
-    monkeypatch.setenv(sessions.REVIEW_SESSION_ENV, str(paired))
-    at = AppTest.from_file(APP, default_timeout=10).run()
-    assert not at.exception
-    assert "not a best-of-N session" in at.error[0].value
-
-
 # --- CLI -----------------------------------------------------------------------------------
 
 runner = CliRunner()
@@ -320,7 +213,7 @@ def test_cli_session_flags_must_fit_one_kind(args: list[str]) -> None:
     assert result.exit_code == 2
 
 
-def test_cli_review_launches_the_best_of_page(
+def test_cli_review_launches_the_main_ui_for_a_best_of_session(
     session: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[list[str]] = []
