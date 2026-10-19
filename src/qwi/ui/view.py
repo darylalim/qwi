@@ -234,13 +234,14 @@ def error_banner(snap: JobSnapshot) -> ErrorBanner | None:
     return ErrorBanner(ERROR_TITLES[kind], message, found)
 
 
-def log_lines(run_dir: Path, limit: int = 200) -> list[str]:
-    """The run's last `limit` log entries, readable, each with its traceback indented below."""
+def log_lines(run_dir: Path, limit: int = 200, min_level: str = "DEBUG") -> list[str]:
+    """The run's last `limit` log entries at `min_level` or above, readable, each with its
+    traceback indented below. Always the run's own `run.log`: `qwi.log` has other runs' lines."""
     path = run_dir / "run.log"
     if not path.exists():
         return []
     out = []
-    for line in logs.read(path)[-limit:]:
+    for line in logs.read(path, min_level)[-limit:]:
         out.append(
             f"{line['ts'][11:19]}  {line['level']:<7}  {line.get('stage') or '-':<8}  {line['msg']}"
         )

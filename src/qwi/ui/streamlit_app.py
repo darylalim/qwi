@@ -21,7 +21,10 @@ st.set_page_config(
 )
 
 page = st.navigation(
-    [st.Page("app_pages/generate.py", title="Generate", icon=":material/auto_awesome:")]
+    [
+        st.Page("app_pages/generate.py", title="Generate", icon=":material/auto_awesome:"),
+        st.Page("app_pages/history.py", title="History", icon=":material/history:"),
+    ]
 )
 st.sidebar.caption(f"qwi {version('qwi')}")
 page.run()
