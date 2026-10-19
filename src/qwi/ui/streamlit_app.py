@@ -10,6 +10,7 @@ from importlib.metadata import version
 import streamlit as st
 
 from qwi import logs, sessions
+from qwi.ui import components
 
 # Jobs and rewrite-only runs log outside any run.log; attached once per process (§5.11).
 logs.app_log()
@@ -34,5 +35,6 @@ page = st.navigation(
         ),
     ]
 )
+components.doctor_status()
 st.sidebar.caption(f"qwi {version('qwi')}")
 page.run()

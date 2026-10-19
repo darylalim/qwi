@@ -44,7 +44,8 @@ def images(at: AppTest) -> list:
 
 
 def badges(at: AppTest) -> list[str]:
-    return [m.value for m in at.markdown if "badge[" in m.value]
+    """Badges on the page itself, not the sidebar's doctor line."""
+    return [m.value for m in at.main.markdown if "badge[" in m.value]
 
 
 def test_the_page_opens_with_an_empty_result_area() -> None:
