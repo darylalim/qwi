@@ -4,12 +4,18 @@ Submitting runs in the button's callback, before the script, so the same rerun a
 the form disabled. The results fragment polls the job once a second only while it runs, and
 reruns the page when it ends so the form comes back. Errors get their §5.11 banner, one-click
 cheaper retries, and the run's log.
+
+Rewrite, then edit (§5.6): **Rewrite only** runs a short `rewrite_only` job; its result fills the
+editable **Prompt to generate**, and **Generate from this prompt** runs it as given, still ranked
+against the original prompt. The area stays until **Clear**, so an edit can be tried again.
 """
+
+from typing import Any
 
 import streamlit as st
 
 from qwi.config import DEFAULTS
-from qwi.pipeline import GenerateRequest
+from qwi.pipeline import GenerateRequest, RewriteResult
 from qwi.ui import components, view
 from qwi.ui.jobs import Busy, JobSnapshot
 
@@ -17,29 +23,81 @@ SIZES = [512, 768, 1024]
 GUARD_MODES = ["strict", "default", "loose"]
 CARD_WIDTH = 384  # px: the "M" thumbnail, 768 device pixels on Retina (§5.6); sizes come in M5c
 
+EDIT_KEYS = ("gen_edit", "gen_edit_result", "gen_edit_verdicts")  # the editable rewrite
+
 jobs = components.job_manager()
 
 
-def submit() -> None:
+def form_request(prompt: str, **changes: Any) -> GenerateRequest:
+    """A request from the form's settings; `changes` override them."""
     state = st.session_state
-    prompt = state.gen_prompt.strip()
-    if not prompt:
-        state.gen_notice = "Enter a prompt first."
-        return
-    request = GenerateRequest(
-        prompt,
-        n=state.gen_n,
-        steps=state.gen_steps,
-        width=state.gen_size,
-        height=state.gen_size,
-        seed=state.gen_seed,
-        guard_mode=state.gen_guard,
-        rewrite=state.gen_rewrite,
-    )
+    settings: dict[str, Any] = {
+        "n": state.gen_n,
+        "steps": state.gen_steps,
+        "width": state.gen_size,
+        "height": state.gen_size,
+        "seed": state.gen_seed,
+        "guard_mode": state.gen_guard,
+        "rewrite": state.gen_rewrite,
+    }
+    return GenerateRequest(prompt, **(settings | changes))
+
+
+def send(request: GenerateRequest, kind: str = "generate") -> None:
     try:
-        jobs.submit(request)
+        jobs.submit(request, kind)
     except Busy:
-        state.gen_notice = "A run is already in progress."
+        st.session_state.gen_notice = "A run is already in progress."
+
+
+def entered_prompt(key: str) -> str | None:
+    prompt = st.session_state[key].strip()
+    if not prompt:
+        st.session_state.gen_notice = "Enter a prompt first."
+        return None
+    return prompt
+
+
+def submit() -> None:
+    if prompt := entered_prompt("gen_prompt"):
+        send(form_request(prompt))
+
+
+def rewrite_only() -> None:
+    if prompt := entered_prompt("gen_prompt"):
+        send(form_request(prompt), "rewrite_only")
+
+
+def submit_edited() -> None:
+    result: RewriteResult = st.session_state.gen_edit_result
+    if prompt := entered_prompt("gen_edit"):
+        send(
+            form_request(
+                prompt,
+                rewrite=False,
+                rerank_query=result.user_prompt,
+                prompt_source="edited_rewrite",
+            )
+        )
+
+
+def clear_edit() -> None:
+    for key in EDIT_KEYS:
+        st.session_state.pop(key, None)
+
+
+def load_rewrite(snap: JobSnapshot | None) -> None:
+    """Fill the editable prompt once per finished rewrite-only job, before the widget exists."""
+    state = st.session_state
+    if snap is None or snap.running or snap.kind != "rewrite_only":
+        return
+    if state.get("gen_edit_job") == snap.number:  # already loaded, maybe edited or cleared since
+        return
+    state.gen_edit_job = snap.number
+    if snap.status == "ok" and snap.rewrite is not None:
+        state.gen_edit = snap.rewrite.prompt
+        state.gen_edit_result = snap.rewrite
+        state.gen_edit_verdicts = view.summarize(snap).verdicts
 
 
 def cancel() -> None:
@@ -110,6 +168,8 @@ def show_error(snap: JobSnapshot, run: view.RunView) -> None:
 def show_outcome(snap: JobSnapshot, run: view.RunView) -> None:
     if run.block is not None:
         st.error(run.block.summary, title="Blocked by guard")
+    elif run.status == "cancelled" and snap.kind == "rewrite_only":
+        st.info("The rewrite was cancelled.", title="Cancelled")
     elif run.status == "cancelled":
         st.info(f"Cancelled after {len(run.candidates)} of {run.n} candidates.", title="Cancelled")
     show_error(snap, run)
@@ -123,6 +183,7 @@ def show_outcome(snap: JobSnapshot, run: view.RunView) -> None:
 
 snapshot = jobs.snapshot()
 busy = snapshot is not None and snapshot.running
+load_rewrite(snapshot)
 
 
 @st.fragment(run_every="1s" if busy else None)
@@ -155,7 +216,10 @@ def results() -> None:
             "if swapping starts. Closing other apps helps.",
             title="Swap risk",
         )
-    if run.rewrite is not None:
+    if snap.kind == "rewrite_only":
+        if snap.status == "ok":
+            st.caption("The rewrite is ready to edit under **Prompt to generate**.")
+    elif run.rewrite is not None:
         with st.expander("Rewritten prompt"):
             st.code(run.rewrite.text, language=None, wrap_lines=True)
         if run.rewrite.fallback_reason:
@@ -190,13 +254,39 @@ with left, st.form("generate", border=False):
         "Guard mode", GUARD_MODES, default=DEFAULTS.guard_mode, required=True, key="gen_guard"
     )
     st.toggle("Rewrite the prompt", value=True, key="gen_rewrite")
-    st.form_submit_button(
-        "Generate",
-        type="primary",
-        icon=":material/auto_awesome:",
-        on_click=submit,
-        disabled=busy,
-    )
+    with st.container(horizontal=True):
+        st.form_submit_button(
+            "Generate",
+            type="primary",
+            icon=":material/auto_awesome:",
+            on_click=submit,
+            disabled=busy,
+        )
+        st.form_submit_button(
+            "Rewrite only",
+            icon=":material/edit_note:",
+            on_click=rewrite_only,
+            disabled=busy,
+        )
+    if (result := st.session_state.get("gen_edit_result")) is not None:
+        st.divider()
+        for verdict in st.session_state.gen_edit_verdicts:
+            if verdict.decision == "warn":
+                st.warning(verdict.summary, title="Guard warning")
+            else:
+                st.caption(f"Guard: {verdict.summary}")
+        if result.fallback_reason:
+            st.caption(f"Rewrite not used ({result.fallback_reason}): this is your prompt.")
+        st.text_area("Prompt to generate", key="gen_edit", height=220)
+        with st.container(horizontal=True):
+            st.form_submit_button(
+                "Generate from this prompt",
+                type="primary",
+                icon=":material/auto_awesome:",
+                on_click=submit_edited,
+                disabled=busy,
+            )
+            st.form_submit_button("Clear", icon=":material/close:", on_click=clear_edit)
     if notice := st.session_state.pop("gen_notice", None):
         st.warning(notice)
 

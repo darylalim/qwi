@@ -225,3 +225,77 @@ def test_a_swap_risk_shows_a_notice_and_the_run_continues(monkeypatch: pytest.Mo
     assert warning.title == "Swap risk"
     assert "Generate needs about 15.0 GB and 9.9 GB is free" in warning.value
     assert len(images(at)) == 4
+
+
+# --- Rewrite, then edit (§5.6) -------------------------------------------------------------
+
+
+def button(at: AppTest, label: str):
+    return next(b for b in at.form_submit_button if b.label == label)
+
+
+def rewrite_only(at: AppTest, prompt: str = "a red apple") -> AppTest:
+    at.text_area(key="gen_prompt").set_value(prompt)
+    button(at, "Rewrite only").click().run()
+    assert not at.exception
+    return at
+
+
+def edit_area(at: AppTest) -> list:
+    return [t for t in at.text_area if t.key == "gen_edit"]
+
+
+def test_rewrite_only_fills_the_editable_prompt_and_generates_from_the_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePipeline()
+    monkeypatch.setattr(jobs, "make_pipeline", lambda kind, script=None: fake)
+    at = rewrite_only(app())
+    (area,) = edit_area(at)
+    assert area.value == "A detailed photograph of a red apple."
+    assert "Guard: input: Safe" in [c.value for c in at.caption]
+    assert not images(at)  # nothing generated yet
+    assert (len(fake.rewrites), fake.requests) == (1, [])
+
+    area.set_value("  A green apple on slate  ")
+    at.number_input(key="gen_n").set_value(2)
+    button(at, "Generate from this prompt").click().run()
+    assert not at.exception
+
+    (request,) = fake.requests
+    assert (request.prompt, request.rewrite, request.n) == ("A green apple on slate", False, 2)
+    assert (request.rerank_query, request.prompt_source) == ("a red apple", "edited_rewrite")
+    assert len(images(at)) == 2
+    assert edit_area(at)[0].value == "  A green apple on slate  "  # kept to try again
+
+
+def test_clear_discards_the_edit() -> None:
+    at = rewrite_only(app())
+    button(at, "Clear").click().run()
+    assert not edit_area(at)
+    at.run()  # the finished rewrite job doesn't fill it again
+    assert not edit_area(at)
+    assert not at.form_submit_button[0].disabled
+
+
+def test_a_blocked_rewrite_shows_the_error_and_no_editable_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(jobs.FAKE_SCRIPT_ENV, "block")
+    at = rewrite_only(app())
+    (error,) = at.error
+    assert error.title == "Blocked by guard"
+    assert not edit_area(at)
+
+
+def test_a_guard_warning_shows_above_the_editable_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(jobs.FAKE_SCRIPT_ENV, "warn")
+    at = rewrite_only(app())
+    assert edit_area(at)
+    assert [w.title for w in at.warning] == ["Guard warning", "Guard warning"]  # form + results
+
+
+def test_rewrite_only_needs_a_prompt() -> None:
+    at = rewrite_only(app(), "  ")
+    assert [w.value for w in at.warning] == ["Enter a prompt first."]
+    assert components.job_manager().snapshot() is None

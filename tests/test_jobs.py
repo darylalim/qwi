@@ -165,3 +165,49 @@ def test_sync_mode_runs_inside_submit() -> None:
     assert snap is not None
     assert snap.status == "ok"
     assert jobs.wait(0)
+
+
+def test_a_rewrite_only_job_keeps_its_result_and_no_record() -> None:
+    fake = FakePipeline()
+    jobs = JobManager(fake)
+    jobs.submit(request(), kind="rewrite_only")
+    finish(jobs)
+
+    snap = jobs.snapshot()
+    assert snap is not None
+    assert (snap.kind, snap.status, snap.record) == ("rewrite_only", "ok", None)
+    assert snap.rewrite is not None
+    assert snap.rewrite.prompt == "A detailed photograph of a red apple."
+    assert [type(e).__name__ for e in snap.events][-1] == "RewriteReady"
+    assert (len(fake.rewrites), fake.requests) == (1, [])
+    assert not paths.runs_dir().exists()
+    assert not lock.is_held()
+
+
+def test_a_blocked_rewrite_only_job_ends_blocked() -> None:
+    jobs = JobManager(FakePipeline(guard="block"))
+    jobs.submit(request(), kind="rewrite_only")
+    finish(jobs)
+    snap = jobs.snapshot()
+    assert snap is not None
+    assert snap.status == "blocked"
+    assert snap.rewrite is not None
+    assert snap.rewrite.rewritten_prompt == ""
+
+
+def test_each_submit_gets_the_next_job_number() -> None:
+    jobs = JobManager(FakePipeline(), sync=True)
+    jobs.submit(request(), kind="rewrite_only")
+    first = jobs.snapshot()
+    jobs.submit(request())
+    second = jobs.snapshot()
+    assert first is not None
+    assert second is not None
+    assert (first.number, second.number, second.kind) == (1, 2, "generate")
+
+
+def test_an_unknown_job_kind_is_refused() -> None:
+    jobs = JobManager(FakePipeline())
+    with pytest.raises(ValueError, match="unknown job kind"):
+        jobs.submit(request(), kind="upscale")
+    assert jobs.snapshot() is None

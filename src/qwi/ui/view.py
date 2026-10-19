@@ -226,8 +226,11 @@ def error_banner(snap: JobSnapshot) -> ErrorBanner | None:
     message = snap.message or "The run stopped with an error."
     if kind not in ERROR_TITLES:
         where = "below" if snap.traceback else "in the log below"
+        if snap.kind == "rewrite_only" and not snap.traceback:  # no run folder, so no run.log
+            where = "in $QWI_HOME/logs/qwi.log"
         return ErrorBanner("Unexpected error", f"{kind}: {message}. Traceback {where}.", ())
-    found = retries(snap.request) if kind in MEMORY_ERRORS else ()
+    # The cheaper settings shrink generation; they don't help a rewrite.
+    found = retries(snap.request) if kind in MEMORY_ERRORS and snap.kind == "generate" else ()
     return ErrorBanner(ERROR_TITLES[kind], message, found)
 
 
