@@ -37,7 +37,8 @@ def test_finds_every_module() -> None:
         "qwi.ui.jobs",
         "qwi.ui.view",
     } <= found
-    assert "qwi.ui.review_app" not in found
+    assert "qwi.ui.review" in found
+    assert "qwi.ui.app_pages.eval_review" not in found
 
 
 def test_qwi_modules_import_no_heavy_libraries() -> None:

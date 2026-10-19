@@ -635,14 +635,13 @@ def eval_review(
         # Open it here so a bad session fails now, not in the browser.
         if sessions.load_manifest(folder).get("kind") == sessions.BESTOF_KIND:
             bestof.open_session(folder)
-            page = "bestof_app.py"
         else:
             sessions.open_session(folder)
-            page = "review_app.py"
     except QwiError as exc:
         raise _fail(exc) from exc
+    # The full UI on its own port, opened on the Eval review page with this session picked.
     env = {sessions.REVIEW_SESSION_ENV: str(folder)}
-    _run_streamlit(page, port, f"reviewing {folder.name}", "The review app", env)
+    _run_streamlit("streamlit_app.py", port, f"reviewing {folder.name}", "The review app", env)
 
 
 @app.command()
