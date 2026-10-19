@@ -3,14 +3,16 @@
 import json
 import shutil
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from qwi import models, paths, storage
-from qwi.errors import InsufficientDisk, ModelUnavailable
+from qwi import models, paths, record, storage
+from qwi.errors import InsufficientDisk, ModelUnavailable, PipelineBusy
+from qwi.lock import RunLock
 from qwi.record import RunRecord
 
 GB = 10**9
@@ -236,3 +238,101 @@ def test_allow_patterns_load_from_models_toml(tmp_path: Path) -> None:
     )
     assert models.load(toml)["encoder-bf16"].allow_patterns == ("text_encoder/*",)
     assert models.load()["image"].allow_patterns is None
+
+
+NOW = datetime(2026, 10, 19, 12, 0).astimezone()
+
+
+def _run(name: str, days_ago: float, *, starred: bool = False, status: str = "ok") -> Path:
+    run = paths.runs_dir() / name
+    run.mkdir(parents=True)
+    (run / "cand_0_seed7.png").write_bytes(b"x" * 100)
+    started = (NOW - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    rec = RunRecord("a red apple", status=status, starred=starred, started_at=started)
+    record.write(rec, run)
+    return run
+
+
+def _names() -> list[str]:
+    return sorted(p.name for p in paths.runs_dir().iterdir())
+
+
+def test_prune_keep_days_spares_recent_and_starred_runs() -> None:
+    _run("20261001-090000-aaaaaa", 18)
+    _run("20261005-090000-bbbbbb", 14, starred=True)
+    _run("20261018-090000-cccccc", 1)
+    result = storage.prune(keep_days=7, now=NOW)
+    [(name, size)] = result.removed
+    assert (name, size > 100) == ("20261001-090000-aaaaaa", True)  # the image and run.json
+    assert result.kept_starred == ["20261005-090000-bbbbbb"]
+    assert _names() == ["20261005-090000-bbbbbb", "20261018-090000-cccccc"]
+
+
+def test_prune_keep_last_counts_starred_runs_toward_n() -> None:
+    _run("20261001-090000-aaaaaa", 18, starred=True)
+    _run("20261005-090000-bbbbbb", 14)
+    _run("20261018-090000-cccccc", 1, starred=True)
+    result = storage.prune(keep_last=1, now=NOW)
+    assert [name for name, _ in result.removed] == ["20261005-090000-bbbbbb"]
+    assert result.kept_starred == ["20261001-090000-aaaaaa"]
+    assert _names() == ["20261001-090000-aaaaaa", "20261018-090000-cccccc"]
+
+
+def test_prune_keep_last_0_removes_everything_unstarred() -> None:
+    _run("20261001-090000-aaaaaa", 18)
+    _run("20261018-090000-cccccc", 1, starred=True)
+    storage.prune(keep_last=0, now=NOW)
+    assert _names() == ["20261018-090000-cccccc"]
+
+
+def test_prune_dry_run_deletes_nothing() -> None:
+    _run("20261001-090000-aaaaaa", 18)
+    result = storage.prune(keep_days=7, dry_run=True, now=NOW)
+    assert [name for name, _ in result.removed] == ["20261001-090000-aaaaaa"]
+    assert _names() == ["20261001-090000-aaaaaa"]
+
+
+def test_prune_never_touches_unreadable_run_folders() -> None:
+    broken = paths.runs_dir() / "20261001-090000-broken"
+    broken.mkdir(parents=True)
+    (broken / "run.json").write_text("{not json", encoding="utf-8")
+    storage.prune(keep_last=0, now=NOW)
+    assert broken.exists()
+
+
+def test_prune_refuses_while_a_run_holds_the_lock() -> None:
+    _run("20261001-090000-aaaaaa", 18)
+    with RunLock(), pytest.raises(PipelineBusy):
+        storage.prune(keep_last=0, now=NOW)
+    assert _names() == ["20261001-090000-aaaaaa"]
+
+
+def test_prune_removes_a_dead_running_run_by_age() -> None:
+    _run("20261001-090000-aaaaaa", 18, status="running")
+    storage.prune(keep_days=7, now=NOW)
+    assert _names() == []
+
+
+def test_prune_eval_removes_old_image_folders_only() -> None:
+    for name in ["2026-10-01_baseline", "2026-10-18_bo4", "notes"]:
+        (paths.eval_dir() / name).mkdir(parents=True)
+        (paths.eval_dir() / name / "p01_1000.png").write_bytes(b"x")
+    _run("20261001-090000-aaaaaa", 18)
+    result = storage.prune(keep_days=7, eval_images=True, now=NOW)
+    assert [name for name, _ in result.removed] == ["2026-10-01_baseline"]
+    assert sorted(p.name for p in paths.eval_dir().iterdir()) == ["2026-10-18_bo4", "notes"]
+    assert _names() == ["20261001-090000-aaaaaa"]  # runs untouched
+
+
+def test_prune_eval_keep_last_orders_by_date() -> None:
+    for name in ["2026-10-18_a", "2026-10-01_z", "2026-10-15_m"]:
+        (paths.eval_dir() / name).mkdir(parents=True)
+    result = storage.prune(keep_last=2, eval_images=True, now=NOW)
+    assert [name for name, _ in result.removed] == ["2026-10-01_z"]
+
+
+def test_prune_targets_needs_exactly_one_rule() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        storage.prune_targets([], keep_days=1, keep_last=1, now=NOW)
+    with pytest.raises(ValueError, match="exactly one"):
+        storage.prune_targets([], keep_days=None, keep_last=None, now=NOW)
