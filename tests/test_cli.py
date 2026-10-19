@@ -1,6 +1,8 @@
 import logging
 import math
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -600,3 +602,58 @@ def test_rewrite_reports_busy_with_exit_3(monkeypatch: pytest.MonkeyPatch) -> No
     result = runner.invoke(cli.app, ["rewrite", "p"])
     assert result.exit_code == 3
     assert "Another run is in progress" in result.stderr
+
+
+# --- qwi ui (§5.6 "Launching") ---------------------------------------------------------------
+
+UI_APP = str(Path(cli.__file__).parent / "ui" / "streamlit_app.py")
+
+
+def launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def call(command: list[str], *, env: dict[str, str], cwd: Path) -> int:
+        calls.append({"command": command, "env": env, "cwd": cwd})
+        return 0
+
+    monkeypatch.setattr(cli.subprocess, "call", call)
+    return calls
+
+
+def test_ui_launches_streamlit_on_the_ui_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = launches(monkeypatch)
+    result = runner.invoke(cli.app, ["ui"])
+    assert result.exit_code == 0
+    (launched,) = calls
+    assert launched["command"] == [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        UI_APP,
+        "--server.port",
+        str(DEFAULTS.ui_port),
+    ]
+    assert launched["cwd"] == paths.REPO  # where .streamlit/config.toml lives
+    assert launched["env"]["QWI_HOME"] == os.environ["QWI_HOME"]  # the environment passes through
+    assert f"qwi at http://localhost:{DEFAULTS.ui_port}" in result.output
+
+
+def test_ui_takes_a_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = launches(monkeypatch)
+    assert runner.invoke(cli.app, ["ui", "--port", "9000"]).exit_code == 0
+    assert calls[0]["command"][-2:] == ["--server.port", "9000"]
+
+
+def test_ui_without_the_ui_extra_says_how_to_install_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = launches(monkeypatch)
+    monkeypatch.setattr(cli, "find_spec", lambda name: None)
+    result = runner.invoke(cli.app, ["ui"])
+    assert result.exit_code == 1
+    assert "The UI needs the ui extra: uv sync --all-extras" in result.stderr
+    assert calls == []
+
+
+def test_ui_exits_with_streamlits_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 3)
+    assert runner.invoke(cli.app, ["ui"]).exit_code == 3

@@ -641,16 +641,31 @@ def eval_review(
             page = "review_app.py"
     except QwiError as exc:
         raise _fail(exc) from exc
+    env = {sessions.REVIEW_SESSION_ENV: str(folder)}
+    _run_streamlit(page, port, f"reviewing {folder.name}", "The review app", env)
+
+
+@app.command()
+def ui(
+    port: Annotated[int, typer.Option(help="Local port for the app.")] = DEFAULTS.ui_port,
+) -> None:
+    """The Streamlit UI: generate, watch progress, cancel (§5.6)."""
+    _run_streamlit("streamlit_app.py", port, "qwi", "The UI")
+
+
+def _run_streamlit(
+    page: str, port: int, what: str, needs: str, env: dict[str, str] | None = None
+) -> None:
+    """Run `ui/<page>` with this interpreter's Streamlit until Ctrl-C; exits with its code."""
     if find_spec("streamlit") is None:
-        typer.echo("The review app needs the ui extra: uv sync --all-extras", err=True)
+        typer.echo(f"{needs} needs the ui extra: uv sync --all-extras", err=True)
         raise typer.Exit(1)
     app_path = Path(__file__).parent / "ui" / page
     command = [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)]
-    env = {**os.environ, sessions.REVIEW_SESSION_ENV: str(folder)}
-    typer.echo(f"reviewing {folder.name} at http://localhost:{port} (Ctrl-C to stop)")
+    typer.echo(f"{what} at http://localhost:{port} (Ctrl-C to stop)")
     try:
         # From the repo root, so Streamlit reads .streamlit/config.toml (localhost only).
-        code = subprocess.call(command, env=env, cwd=paths.REPO)
+        code = subprocess.call(command, env={**os.environ, **(env or {})}, cwd=paths.REPO)
     except KeyboardInterrupt:  # the app got the same Ctrl-C and is shutting down
         code = 0
     raise typer.Exit(code)
