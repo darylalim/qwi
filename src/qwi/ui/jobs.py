@@ -22,7 +22,7 @@ from qwi.pipeline import GenerateRequest, Pipeline
 from qwi.record import RunRecord
 
 PIPELINE_ENV = "QWI_PIPELINE"  # "fake": the scripted `FakePipeline` (tests, CI)
-FAKE_SCRIPT_ENV = "QWI_FAKE_SCRIPT"  # which `FakePipeline.scripted()` run: ok, warn, block, low
+FAKE_SCRIPT_ENV = "QWI_FAKE_SCRIPT"  # which `FakePipeline.scripted()` run (ok, warn, ...)
 SYNC_ENV = "QWI_JOBS_SYNC"  # "1": run jobs inside `submit()` (AppTest, §5.6 "Tests")
 
 

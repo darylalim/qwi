@@ -30,6 +30,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
@@ -307,7 +308,7 @@ class Pipeline:
         second pass, then both are evicted before encoding (§4). A block raises `GuardBlocked`.
         """
         policy = guard.load_policy()  # a broken table fails before anything loads
-        self._preflight(request, rec, run, "guard", preflight.STATIC_GB["guard"])
+        self._preflight(request, rec, run, on_event, "guard", preflight.STATIC_GB["guard"])
         checker = self._make_guard(self._resolve("guard"))
         rewriter: RewriteStage | None = None
         try:
@@ -321,7 +322,7 @@ class Pipeline:
             if not request.rewrite:
                 return request.prompt
 
-            self._preflight(request, rec, run, "rewrite", preflight.STATIC_GB["rewrite"])
+            self._preflight(request, rec, run, on_event, "rewrite", preflight.STATIC_GB["rewrite"])
             rewriter = self._make_rewrite(self._resolve("rewrite"), request.rewrite_style)
             with self._measure(rec, "rewrite", on_event, style=request.rewrite_style):
                 rewriter.load()
@@ -380,12 +381,21 @@ class Pipeline:
             raise GuardBlocked(result.summary())
 
     def _preflight(
-        self, request: GenerateRequest, rec: RunRecord, run: Path, stage: str, est: float
+        self,
+        request: GenerateRequest,
+        rec: RunRecord,
+        run: Path,
+        on_event: Callable[[Event], None],
+        stage: str,
+        est: float,
     ) -> None:
         """The stage's memory check before anything loads, then a last chance to cancel."""
         self._stage = stage
-        rec.preflight[stage] = preflight.check(stage, est).as_record()
+        check = preflight.check(stage, est)
+        rec.preflight[stage] = check.as_record()
         record.write(rec, run)
+        if check.decision == "swap_risk":
+            on_event(PreflightWarning(stage, check.est_gb, check.avail_gb))
         if request.cancel.is_set():
             raise GenerationCancelled()
 
@@ -431,7 +441,7 @@ class Pipeline:
             preflight.generate_gb(request.width, request.height, encoder_resident=False),
             preflight.history_gb(stage, history),
         )
-        self._preflight(request, rec, run, stage, est)
+        self._preflight(request, rec, run, on_event, stage, est)
 
         watchdog = memory.SwapWatchdog(stage, preflight.swap_limit_bytes(request.allow_swap))
         watchdog.start()  # baseline before the model loads (§8 watchdog method)
@@ -510,7 +520,7 @@ class Pipeline:
         on_event: Callable[[Event], None],
     ) -> None:
         """Stage 5: score each image against the user's prompt, then link `best.png` (§5.3)."""
-        self._preflight(request, rec, run, "rerank", preflight.STATIC_GB["rerank"])
+        self._preflight(request, rec, run, on_event, "rerank", preflight.STATIC_GB["rerank"])
         reranker = self._make_rerank(self._resolve("rerank"), request.rerank_instruction)
         swap_limit = preflight.swap_limit_bytes(request.allow_swap)
         scores: list[rerank.Score] = []

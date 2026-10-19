@@ -25,6 +25,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
@@ -131,6 +132,12 @@ def _render(event: Event, show_rewrite: bool = False) -> None:
             typer.echo(f"run {run_dir.name} (seeds {seeds[0]}…{seeds[-1]})")
         case StageStarted(stage):
             typer.echo(f"{stage}: loading")
+        case PreflightWarning(stage, est_gb, avail_gb):
+            typer.echo(
+                f"swap risk before {stage}: needs ~{est_gb:.1f} GB, {avail_gb:.1f} GB available; "
+                "continuing (the swap watchdog stops the run if macOS starts swapping)",
+                err=True,
+            )
         case GuardVerdict(decision="warn", summary=summary):
             typer.echo(f"guard warning: {summary}", err=True)
         case GuardVerdict(decision="block", summary=summary):
