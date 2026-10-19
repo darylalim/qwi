@@ -7,7 +7,7 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from qwi import errors, lock
+from qwi import errors, lock, logs, paths
 from qwi.ui import components, jobs
 from qwi.ui.fake import FakePipeline, Hold
 
@@ -299,3 +299,12 @@ def test_rewrite_only_needs_a_prompt() -> None:
     at = rewrite_only(app(), "  ")
     assert [w.value for w in at.warning] == ["Enter a prompt first."]
     assert components.job_manager().snapshot() is None
+
+
+def test_jobs_log_to_the_app_log() -> None:
+    # A rewrite-only job has no run.log; its lines and the job's go to qwi.log (§5.11).
+    at = rewrite_only(app())
+    assert edit_area(at)
+    lines = logs.read(paths.logs_dir() / "qwi.log")
+    finished = [x for x in lines if x["event"] == "job_finished"]
+    assert [(x["kind"], x["status"]) for x in finished] == [("rewrite_only", "ok")]

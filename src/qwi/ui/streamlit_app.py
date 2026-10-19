@@ -8,6 +8,11 @@ from importlib.metadata import version
 
 import streamlit as st
 
+from qwi import logs
+
+# Jobs and rewrite-only runs log outside any run.log; attached once per process (§5.11).
+logs.app_log()
+
 st.set_page_config(
     page_title="qwi",
     page_icon=":material/photo_library:",
