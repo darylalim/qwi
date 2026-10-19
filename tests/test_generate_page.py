@@ -7,7 +7,7 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from qwi import lock
+from qwi import errors, lock
 from qwi.ui import components, jobs
 from qwi.ui.fake import FakePipeline, Hold
 
@@ -144,10 +144,84 @@ def test_while_a_job_runs_the_form_is_disabled_and_cancel_stops_it(
     assert [c.value for c in at.caption if c.value.startswith("Seed")] == ["Seed 1000 · not ranked"]
 
 
-def test_a_pipeline_that_raises_shows_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_pipeline_that_raises_shows_an_unexpected_error_and_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     boom = FakePipeline(raises=RuntimeError("boom"))
     monkeypatch.setattr(jobs, "make_pipeline", lambda kind, script=None: boom)
     at = generate(app())
     (error,) = at.error
-    assert (error.title, error.value) == ("Run failed", "boom")
+    assert (error.title, error.value) == (
+        "Unexpected error",
+        "RuntimeError: boom. Traceback below.",
+    )
+    assert [e.label for e in at.expander][-2:] == ["Traceback", "View log"]
+    assert not retry_buttons(at)
     assert not lock.is_held()
+
+
+def retry_buttons(at: AppTest) -> list[str]:
+    return [b.label for b in at.button if b.label.startswith("Retry")]
+
+
+@pytest.mark.parametrize(
+    ("error", "title", "retries"),
+    [
+        (errors.InsufficientMemory("generate", 30.0, 22.9), "Not enough free memory", True),
+        (errors.DeviceOutOfMemory("generate", "swap"), "Ran out of GPU memory", True),
+        (errors.ModelUnavailable("image", "missing"), "Model not available", False),
+        (errors.DiskFull(10**9), "Disk full", False),
+        (errors.InsufficientDisk("a run", 0, 10**9, 20 * 10**9), "Not enough disk", False),
+        (RuntimeError("unknown"), "Unexpected error", False),
+    ],
+)
+def test_each_error_class_shows_its_banner_actions_and_log(
+    error: Exception, title: str, retries: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(jobs, "make_pipeline", lambda kind, script=None: FakePipeline(fails=error))
+    at = generate(app())
+    (banner,) = at.error
+    assert banner.title == title
+    expected = ["Retry at 512²", "Retry with N=2"] if retries else []
+    assert retry_buttons(at) == expected
+    log = next(e for e in at.expander if e.label == "View log")
+    assert f"{type(error).__name__}: " in log.code[0].value  # the ERROR line's traceback
+    assert "Traceback" not in [e.label for e in at.expander]  # it's in the log instead
+
+
+@pytest.mark.parametrize(
+    ("label", "size", "n"), [("Retry at 512²", 512, 4), ("Retry with N=2", 768, 2)]
+)
+def test_a_retry_resubmits_with_the_cheaper_setting(
+    label: str, size: int, n: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakePipeline(fails=errors.DeviceOutOfMemory("generate", "swap"))
+    monkeypatch.setattr(jobs, "make_pipeline", lambda kind, script=None: fake)
+    at = generate(app())
+    fake.fails = None
+    next(b for b in at.button if b.label == label).click().run()
+    assert not at.exception
+
+    first, second = fake.requests
+    assert (second.width, second.height, second.n) == (size, size, n)
+    assert (second.prompt, second.seed) == (first.prompt, first.seed)
+    assert not at.error
+    assert len(images(at)) == n
+
+
+def test_a_run_held_by_another_process_shows_busy() -> None:
+    at = app()
+    with lock.RunLock():
+        generate(at)
+    (banner,) = at.error
+    assert banner.title == "Another run is in progress"
+    assert not [e.label for e in at.expander if e.label == "View log"]  # no run was created
+
+
+def test_a_swap_risk_shows_a_notice_and_the_run_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(jobs.FAKE_SCRIPT_ENV, "swap")
+    at = generate(app())
+    (warning,) = at.warning
+    assert warning.title == "Swap risk"
+    assert "Generate needs about 15.0 GB and 9.9 GB is free" in warning.value
+    assert len(images(at)) == 4

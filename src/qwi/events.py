@@ -1,6 +1,6 @@
 """Typed pipeline events (PLAN.md §5.6): `Pipeline.run` emits them; the CLI and UI render them.
 
-M2 added `GuardVerdict` and `RewriteReady`, M3 `RerankDone`.
+M2 added `GuardVerdict` and `RewriteReady`, M3 `RerankDone`, M5a `PreflightWarning`.
 """
 
 from dataclasses import dataclass
@@ -23,6 +23,15 @@ class StageFinished:
     stage: str
     seconds: float
     peak_gb: float
+
+
+@dataclass(frozen=True)
+class PreflightWarning:
+    """A stage's memory pre-check says swap risk; the run continues (§5.11, §8 2026-10-17)."""
+
+    stage: str
+    est_gb: float
+    avail_gb: float
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,7 @@ Event = (
     RunStarted
     | StageStarted
     | StageFinished
+    | PreflightWarning
     | GuardVerdict
     | RewriteReady
     | DenoiseStep

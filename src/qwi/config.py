@@ -56,6 +56,9 @@ class Defaults:
     # Streamlit ports: the main UI and the eval review app run side by side (PLAN.md §5.6).
     ui_port: int = 8501
     review_port: int = 8502
+    # The UI's one-click retries after a memory error: the cheaper settings §5.11 suggests.
+    retry_size: int = 512
+    retry_n: int = 2
     # run.log / app log level; `-v` or QWI_LOG_LEVEL=DEBUG overrides it (§5.11 "Logs").
     log_level: str = "INFO"
 

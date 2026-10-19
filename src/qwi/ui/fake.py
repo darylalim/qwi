@@ -20,6 +20,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
@@ -70,22 +71,31 @@ class Hold:
 class FakePipeline:
     """`run()` acts like `Pipeline.run`: it returns the record, or raises `PipelineBusy`.
 
-    `raises` is raised out of `run()` at the first denoising step (a pipeline bug), with the lock
-    held, so callers can check that it's released. `margins` are the rerank scores per candidate
-    and `prob` their probability (below `min_score`: the low-confidence warning). `guard` is the
-    input pass's action: allow, warn (the run continues) or block (it ends `blocked`).
+    - `raises` is raised out of `run()` at the first denoising step (a pipeline bug), with the
+      lock held, so callers can check that it's released.
+    - `fails` is raised there too, but ends the run like the real pipeline does: an `error`
+      record with the type, and the traceback in run.log.
+    - `swap_risk` sends a `PreflightWarning` before generate.
+    - `margins` are the rerank scores per candidate and `prob` their probability (below
+      `min_score`: the low-confidence warning).
+    - `guard` is the input pass's action: allow, warn (the run continues) or block (it ends
+      `blocked`).
     """
 
     def __init__(
         self,
         *,
         raises: BaseException | None = None,
+        fails: Exception | None = None,
+        swap_risk: bool = False,
         hold: Hold | None = None,
         margins: tuple[float, ...] = (0.5, 2.0, -1.0, 1.0),
         prob: float = 0.9,
         guard: str = "allow",
     ) -> None:
         self.raises = raises
+        self.fails = fails
+        self.swap_risk = swap_risk
         self.hold = hold
         self.margins = margins
         self.prob = prob
@@ -95,13 +105,14 @@ class FakePipeline:
 
     @classmethod
     def scripted(cls, name: str) -> "FakePipeline":
-        """A named run for `QWI_FAKE_SCRIPT`: ok, warn (guard warning), block, low (low score)."""
+        """A named run for `QWI_FAKE_SCRIPT`: ok, warn (guard), block, low (score), swap (risk)."""
         scripts: dict[str, dict] = {
             "ok": {},
             "warn": {"guard": "warn"},
             "block": {"guard": "block"},
         }
         scripts["low"] = {"prob": 0.2}
+        scripts["swap"] = {"swap_risk": True}
         if name not in scripts:
             raise ValueError(f"unknown fake script {name!r}; one of {', '.join(scripts)}")
         return cls(**scripts[name])
@@ -118,6 +129,7 @@ class FakePipeline:
         rec = RunRecord(request.prompt, seeds=seeds, config={"n": request.n, "fake": True})
         with logs.run_log(run, request.verbose):
             record.write(rec, run)
+            logs.event(logging.INFO, None, "run_started", "run started", run=run.name)
             on_event(RunStarted(run, seeds))
             try:
                 self._prompt(request, rec, on_event)
@@ -129,6 +141,11 @@ class FakePipeline:
             except GuardBlocked as exc:
                 record.finish(rec, exc, "guard")
                 logs.event(logging.WARNING, "guard", "blocked", str(exc))
+            except Exception as exc:
+                if exc is self.raises:
+                    raise
+                record.finish(rec, exc, "generate")
+                logs.exception("generate", "error", str(exc), type=type(exc).__name__)
             else:
                 record.finish(rec)
             finally:
@@ -138,6 +155,7 @@ class FakePipeline:
     def _stage(self, stage: str, on_event: Callable[[Event], None]) -> None:
         on_event(StageStarted(stage))
         on_event(StageFinished(stage, 0.01, 1.0))
+        logs.event(logging.INFO, stage, "stage_finished", "done")
         self.evictions += 1
 
     def _prompt(
@@ -161,6 +179,8 @@ class FakePipeline:
         on_event: Callable[[Event], None],
     ) -> None:
         self._stage("encode", on_event)
+        if self.swap_risk:
+            on_event(PreflightWarning("generate", 14.97, 9.87))
         on_event(StageStarted("generate"))
         try:
             for index, seed in enumerate(rec.seeds):
@@ -173,6 +193,8 @@ class FakePipeline:
                         self.hold.wait_here()
                     if self.raises is not None:
                         raise self.raises
+                    if self.fails is not None:
+                        raise self.fails
                     if request.cancel.is_set():
                         raise GenerationCancelled()
                 path = run / paths.candidate_name(index, seed)

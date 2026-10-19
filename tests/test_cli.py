@@ -14,6 +14,7 @@ from qwi.events import (
     CandidateReady,
     DenoiseStep,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
@@ -133,6 +134,16 @@ def test_rerank_prints_the_table_then_the_best(capsys: pytest.CaptureFixture[str
     assert lines[:4] == cli.ranked_table(done())
     assert lines[4] == "best: candidate 2 (prob 0.88): /runs/x/best.png"
     assert out.err == ""
+
+
+def test_swap_risk_warns_on_stderr_and_continues(capsys: pytest.CaptureFixture[str]) -> None:
+    cli._render(PreflightWarning("generate", 14.97, 9.87))
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == (
+        "swap risk before generate: needs ~15.0 GB, 9.9 GB available; "
+        "continuing (the swap watchdog stops the run if macOS starts swapping)\n"
+    )
 
 
 def test_low_confidence_warns_on_stderr(capsys: pytest.CaptureFixture[str]) -> None:

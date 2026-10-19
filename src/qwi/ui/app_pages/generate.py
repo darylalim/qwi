@@ -2,7 +2,8 @@
 
 Submitting runs in the button's callback, before the script, so the same rerun already shows
 the form disabled. The results fragment polls the job once a second only while it runs, and
-reruns the page when it ends so the form comes back.
+reruns the page when it ends so the form comes back. Errors get their §5.11 banner, one-click
+cheaper retries, and the run's log.
 """
 
 import streamlit as st
@@ -10,7 +11,7 @@ import streamlit as st
 from qwi.config import DEFAULTS
 from qwi.pipeline import GenerateRequest
 from qwi.ui import components, view
-from qwi.ui.jobs import Busy
+from qwi.ui.jobs import Busy, JobSnapshot
 
 SIZES = [512, 768, 1024]
 GUARD_MODES = ["strict", "default", "loose"]
@@ -45,6 +46,13 @@ def cancel() -> None:
     jobs.cancel()
 
 
+def retry(request: GenerateRequest, kind: str) -> None:
+    try:
+        jobs.submit(view.retry_request(request, kind))
+    except Busy:
+        st.session_state.gen_notice = "A run is already in progress."
+
+
 def show_candidates(run: view.RunView, prompt: str, running: bool) -> None:
     if not run.candidates:
         return
@@ -75,13 +83,36 @@ def show_candidates(run: view.RunView, prompt: str, running: bool) -> None:
                     )
 
 
-def show_outcome(run: view.RunView, message: str | None) -> None:
+def show_error(snap: JobSnapshot, run: view.RunView) -> None:
+    """The §5.11 banner for the error class, its one-click retries, and where to look next."""
+    banner = view.error_banner(snap)
+    if banner is None:
+        return
+    st.error(banner.body, title=banner.title)
+    if banner.retries:
+        with st.container(horizontal=True):
+            for option in banner.retries:
+                st.button(
+                    option.label,
+                    icon=":material/refresh:",
+                    on_click=retry,
+                    args=(snap.request, option.kind),
+                    key=f"retry_{option.kind}",
+                )
+    if snap.traceback:
+        with st.expander("Traceback"):
+            st.code(snap.traceback, language=None)
+    if run.run_dir is not None and (lines := view.log_lines(run.run_dir)):
+        with st.expander("View log", icon=":material/description:"):
+            st.code("\n".join(lines), language=None, height=320)
+
+
+def show_outcome(snap: JobSnapshot, run: view.RunView) -> None:
     if run.block is not None:
         st.error(run.block.summary, title="Blocked by guard")
     elif run.status == "cancelled":
         st.info(f"Cancelled after {len(run.candidates)} of {run.n} candidates.", title="Cancelled")
-    elif run.status == "error":
-        st.error(message or "The run stopped with an error.", title="Run failed")
+    show_error(snap, run)
     if run.low_confidence and run.rerank is not None:
         best = max(run.rerank.probs)
         st.warning(
@@ -117,12 +148,19 @@ def results() -> None:
         )
     for verdict in run.warnings:
         st.warning(verdict.summary, title="Guard warning")
+    for risk in run.swap_risks:
+        st.warning(
+            f"{view.STAGE_LABELS.get(risk.stage, risk.stage)} needs about {risk.est_gb:.1f} GB "
+            f"and {risk.avail_gb:.1f} GB is free, so macOS may swap. The run continues; it stops "
+            "if swapping starts. Closing other apps helps.",
+            title="Swap risk",
+        )
     if run.rewrite is not None:
         with st.expander("Rewritten prompt"):
             st.code(run.rewrite.text, language=None, wrap_lines=True)
         if run.rewrite.fallback_reason:
             st.caption(f"Generated from your prompt instead: {run.rewrite.fallback_reason}")
-    show_outcome(run, snap.message)
+    show_outcome(snap, run)
     show_candidates(run, snap.request.prompt, snap.running)
 
 

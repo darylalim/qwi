@@ -25,6 +25,7 @@ from qwi.events import (
     DenoiseStep,
     Event,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
@@ -398,6 +399,17 @@ def test_swap_risk_runs_and_records_the_decision(
     rec = h.run(width=768, height=768)  # 14.95 GB estimate, ~9.9 GB available after headroom
     assert rec.status == "ok"
     assert rec.preflight["generate"]["decision"] == "swap_risk"
+    (warning,) = [e for e in h.events if isinstance(e, PreflightWarning)]  # generate only
+    assert warning.stage == "generate"
+    assert (round(warning.est_gb, 2), round(warning.avail_gb, 2)) == (
+        rec.preflight["generate"]["est_gb"],
+        rec.preflight["generate"]["avail_gb"],
+    )
+
+
+def test_no_swap_risk_sends_no_warning(h: Harness) -> None:
+    h.run()
+    assert not [e for e in h.events if isinstance(e, PreflightWarning)]
 
 
 def test_swap_during_the_stage_is_recorded(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:

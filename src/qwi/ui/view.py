@@ -4,20 +4,25 @@ The page renders a `RunView` and nothing else, so everything it decides (stage s
 guard verdicts, the ranking) is tested with plain pytest, not AppTest.
 """
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
+from qwi import logs
+from qwi.config import DEFAULTS
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
     GuardVerdict,
+    PreflightWarning,
     RerankDone,
     RewriteReady,
     RunStarted,
     StageFinished,
     StageStarted,
 )
+from qwi.pipeline import GenerateRequest
 from qwi.ui.jobs import JobSnapshot
 
 StageState = Literal["running", "complete", "error"]  # `st.status` states
@@ -92,6 +97,7 @@ class RunView:
     progress: Progress | None  # only while generate runs
     rewrite: RewriteReady | None
     verdicts: tuple[GuardVerdict, ...]  # each guard pass, in order
+    swap_risks: tuple[PreflightWarning, ...]  # stages whose pre-check warned (§5.11)
     candidates: tuple[CandidateView, ...]
     rerank: RerankDone | None
 
@@ -114,6 +120,7 @@ def summarize(snap: JobSnapshot) -> RunView:
     step: DenoiseStep | None = None
     rewrite: RewriteReady | None = None
     verdicts: list[GuardVerdict] = []
+    swap_risks: list[PreflightWarning] = []
     candidates: dict[int, CandidateView] = {}
     rerank: RerankDone | None = None
     for event in snap.events:
@@ -132,6 +139,8 @@ def summarize(snap: JobSnapshot) -> RunView:
                 rewrite = event
             case GuardVerdict():
                 verdicts.append(event)
+            case PreflightWarning():
+                swap_risks.append(event)
             case CandidateReady():
                 candidates[event.index] = CandidateView(event.index, event.seed, event.path)
             case RerankDone():
@@ -158,6 +167,80 @@ def summarize(snap: JobSnapshot) -> RunView:
         progress,
         rewrite,
         tuple(verdicts),
+        tuple(swap_risks),
         tuple(candidates[i] for i in sorted(candidates)),
         rerank,
     )
+
+
+# --- Errors (§5.11 "Error types"): one banner per class, with its action -------------------
+
+ERROR_TITLES = {
+    "PipelineBusy": "Another run is in progress",
+    "InsufficientMemory": "Not enough free memory",
+    "DeviceOutOfMemory": "Ran out of GPU memory",
+    "ModelUnavailable": "Model not available",
+    "DiskFull": "Disk full",
+    "InsufficientDisk": "Not enough disk",
+}
+MEMORY_ERRORS = {"InsufficientMemory", "DeviceOutOfMemory"}  # retrying smaller can help
+
+
+@dataclass(frozen=True)
+class Retry:
+    kind: str  # size | count
+    label: str
+
+
+@dataclass(frozen=True)
+class ErrorBanner:
+    title: str
+    body: str
+    retries: tuple[Retry, ...]  # one-click cheaper settings; no automatic retries (§5.11)
+
+
+def retries(request: GenerateRequest) -> tuple[Retry, ...]:
+    """The cheaper settings that differ from this request's (§5.11 "Retry at 512²", "N=2")."""
+    found = []
+    if max(request.width, request.height) > DEFAULTS.retry_size:
+        found.append(Retry("size", f"Retry at {DEFAULTS.retry_size}²"))
+    if request.n > DEFAULTS.retry_n:
+        found.append(Retry("count", f"Retry with N={DEFAULTS.retry_n}"))
+    return tuple(found)
+
+
+def retry_request(request: GenerateRequest, kind: str) -> GenerateRequest:
+    """The same request at the cheaper setting, with a fresh cancel flag."""
+    changes: dict[str, int] = (
+        {"width": DEFAULTS.retry_size, "height": DEFAULTS.retry_size}
+        if kind == "size"
+        else {"n": DEFAULTS.retry_n}
+    )
+    return replace(request, cancel=threading.Event(), **changes)
+
+
+def error_banner(snap: JobSnapshot) -> ErrorBanner | None:
+    if snap.status != "error":
+        return None
+    kind = snap.error_type or "error"
+    message = snap.message or "The run stopped with an error."
+    if kind not in ERROR_TITLES:
+        where = "below" if snap.traceback else "in the log below"
+        return ErrorBanner("Unexpected error", f"{kind}: {message}. Traceback {where}.", ())
+    found = retries(snap.request) if kind in MEMORY_ERRORS else ()
+    return ErrorBanner(ERROR_TITLES[kind], message, found)
+
+
+def log_lines(run_dir: Path, limit: int = 200) -> list[str]:
+    """The run's last `limit` log entries, readable, each with its traceback indented below."""
+    path = run_dir / "run.log"
+    if not path.exists():
+        return []
+    out = []
+    for line in logs.read(path)[-limit:]:
+        out.append(
+            f"{line['ts'][11:19]}  {line['level']:<7}  {line.get('stage') or '-':<8}  {line['msg']}"
+        )
+        if trace := line.get("traceback"):
+            out += [f"    {row}" for row in trace.splitlines()]
+    return out
