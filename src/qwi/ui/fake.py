@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image
 
 from qwi import logs, paths, record
-from qwi.errors import GenerationCancelled
+from qwi.errors import GenerationCancelled, GuardBlocked
 from qwi.events import (
     CandidateReady,
     DenoiseStep,
@@ -32,6 +32,19 @@ from qwi.record import RunRecord
 
 COLORS = [(200, 40, 40), (40, 160, 60), (40, 70, 200), (220, 180, 30)]
 SIZE = 8  # pixels: the images only need to exist
+GUARD_VERDICTS = {
+    "allow": GuardVerdict("input", "Safe", (), "allow", "input: Safe"),
+    "warn": GuardVerdict(
+        "input",
+        "Controversial",
+        ("Politically Sensitive Topics",),
+        "warn",
+        "input: Controversial (Politically Sensitive Topics), default mode",
+    ),
+    "block": GuardVerdict(
+        "input", "Unsafe", ("Violent",), "block", "input: Unsafe (Violent), default mode"
+    ),
+}
 
 
 @dataclass
@@ -59,7 +72,8 @@ class FakePipeline:
 
     `raises` is raised out of `run()` at the first denoising step (a pipeline bug), with the lock
     held, so callers can check that it's released. `margins` are the rerank scores per candidate
-    and `prob` their probability (below `min_score`: the low-confidence warning).
+    and `prob` their probability (below `min_score`: the low-confidence warning). `guard` is the
+    input pass's action: allow, warn (the run continues) or block (it ends `blocked`).
     """
 
     def __init__(
@@ -69,13 +83,28 @@ class FakePipeline:
         hold: Hold | None = None,
         margins: tuple[float, ...] = (0.5, 2.0, -1.0, 1.0),
         prob: float = 0.9,
+        guard: str = "allow",
     ) -> None:
         self.raises = raises
         self.hold = hold
         self.margins = margins
         self.prob = prob
+        self.guard = guard
         self.requests: list[GenerateRequest] = []
         self.evictions = 0  # stages unloaded, as the real pipeline does in `finally`
+
+    @classmethod
+    def scripted(cls, name: str) -> "FakePipeline":
+        """A named run for `QWI_FAKE_SCRIPT`: ok, warn (guard warning), block, low (low score)."""
+        scripts: dict[str, dict] = {
+            "ok": {},
+            "warn": {"guard": "warn"},
+            "block": {"guard": "block"},
+        }
+        scripts["low"] = {"prob": 0.2}
+        if name not in scripts:
+            raise ValueError(f"unknown fake script {name!r}; one of {', '.join(scripts)}")
+        return cls(**scripts[name])
 
     def run(self, request: GenerateRequest, on_event: Callable[[Event], None]) -> RunRecord:
         with RunLock():
@@ -97,6 +126,9 @@ class FakePipeline:
             except GenerationCancelled as exc:
                 record.finish(rec, GenerationCancelled(len(rec.candidates), request.n))
                 logs.event(logging.WARNING, None, "cancelled", str(exc))
+            except GuardBlocked as exc:
+                record.finish(rec, exc, "guard")
+                logs.event(logging.WARNING, "guard", "blocked", str(exc))
             else:
                 record.finish(rec)
             finally:
@@ -112,7 +144,9 @@ class FakePipeline:
         self, request: GenerateRequest, rec: RunRecord, on_event: Callable[[Event], None]
     ) -> None:
         self._stage("guard", on_event)
-        on_event(GuardVerdict("input", "Safe", (), "allow", "input: Safe"))
+        on_event(GUARD_VERDICTS[self.guard])
+        if self.guard == "block":
+            raise GuardBlocked(GUARD_VERDICTS["block"].summary)
         if request.rewrite:
             self._stage("rewrite", on_event)
             rec.rewritten_prompt = f"A detailed photograph of {request.prompt}."
