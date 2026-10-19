@@ -1,7 +1,7 @@
 """The runtime never imports torch (PLAN.md §8): run each stage's real code, then check sys.modules.
 
 Slow: loads real models from the local HF cache at the pinned `models.toml` revisions, offline.
-M1, M2, M3 and M4 each add a test here for their new stage (PLAN.md §6).
+M1, M2, M3 and M4 each add a test here for their new stage, and M5a one for the UI (PLAN.md §6).
 """
 
 import gc
@@ -46,6 +46,15 @@ def test_model_libraries_import_without_torch() -> None:
     import mflux  # noqa: F401
     import mlx_lm  # noqa: F401
     import mlx_vlm  # noqa: F401
+
+    assert_torch_free()
+
+
+def test_the_ui_imports_without_torch() -> None:
+    # M5a: Streamlit doesn't depend on torch, and the UI's job layer loads no model code (§5.6).
+    import streamlit  # noqa: F401
+
+    import qwi.ui.jobs  # noqa: F401
 
     assert_torch_free()
 
