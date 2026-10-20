@@ -8,11 +8,10 @@ the selection stays on it when newer runs appear above it. The page is read-only
 import streamlit as st
 
 from qwi import errors, record
-from qwi.ui import history, view
+from qwi.ui import components, history, view
 from qwi.ui.history import RunEntry
 
 LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
-CARD_WIDTH = 256  # px: smaller than Generate's cards, a run has up to 8 (§5.6); sizes come in M5c
 
 
 def select() -> None:
@@ -32,24 +31,13 @@ def toggle_star(entry: RunEntry) -> None:
 
 
 def show_candidates(entry: RunEntry) -> None:
-    candidates = entry.candidates()
-    if not candidates:
-        return
-    with st.container(horizontal=True, gap="medium"):
-        for c in candidates:
-            with st.container(border=True, width=CARD_WIDTH):
-                if c.path.exists():
-                    st.image(
-                        str(c.path),
-                        width="stretch",
-                        output_format="PNG",
-                        alt=f"{entry.record.user_prompt} (seed {c.seed})",
-                    )
-                else:
-                    st.caption(f"{c.path.name} is missing")
-                st.caption(c.caption if c.prob is not None else f"{c.caption} · not ranked")
-                if c.best:
-                    st.badge("Best", color="violet", icon=":material/star:")
+    if candidates := entry.candidates():
+        components.candidate_grid(
+            candidates,
+            components.thumb_width(),
+            prompt=entry.record.user_prompt,
+            name=entry.run_id,
+        )
 
 
 def show_log(entry: RunEntry) -> None:
@@ -66,6 +54,26 @@ def show_log(entry: RunEntry) -> None:
 
 
 def show_run(entry: RunEntry) -> None:
+    with components.reading():
+        show_summary(entry)
+    show_candidates(entry)
+    if rows := entry.stage_rows():
+        st.dataframe(
+            rows,
+            hide_index=True,
+            width="content",
+            column_config={
+                "Seconds": st.column_config.NumberColumn(format="%.1f"),
+                "Peak GB": st.column_config.NumberColumn(format="%.1f"),
+                "Swap GB": st.column_config.NumberColumn(format="%.2f"),
+            },
+            alt="Time, peak memory and swap per stage",
+        )
+    show_log(entry)
+
+
+def show_summary(entry: RunEntry) -> None:
+    """The run's status, notices, prompts, guard and settings: the text above its images."""
     rec = entry.record
     running = rec.status == "running"
     with st.container(horizontal=True, vertical_alignment="center"):
@@ -104,8 +112,7 @@ def show_run(entry: RunEntry) -> None:
     if rec.continued_from:
         st.caption(f"More seeds for run {rec.continued_from}: its prompt, no new rewrite.")
     if rec.rewritten_prompt:
-        with st.expander("Rewritten prompt"):
-            st.code(rec.rewritten_prompt, language=None, wrap_lines=True)
+        components.long_text("Rewritten prompt", rec.rewritten_prompt)
         if rec.rewrite_fallback_reason:
             st.caption(f"Generated from the user's prompt instead: {rec.rewrite_fallback_reason}")
     if rec.prompt_source == "edited_rewrite":
@@ -114,21 +121,6 @@ def show_run(entry: RunEntry) -> None:
         st.caption(f"Guard · {line}")
     if config := entry.config_line():
         st.caption(config)
-
-    show_candidates(entry)
-    if rows := entry.stage_rows():
-        st.dataframe(
-            rows,
-            hide_index=True,
-            width="content",
-            column_config={
-                "Seconds": st.column_config.NumberColumn(format="%.1f"),
-                "Peak GB": st.column_config.NumberColumn(format="%.1f"),
-                "Swap GB": st.column_config.NumberColumn(format="%.2f"),
-            },
-            alt="Time, peak memory and swap per stage",
-        )
-    show_log(entry)
 
 
 entries = history.load()
@@ -139,7 +131,8 @@ if not entries:
 ids = [e.run_id for e in entries]
 st.session_state.hist_ids = ids
 selected = next((e for e in entries if e.run_id == st.query_params.get("run")), None)
-st.dataframe(
+table, detail = components.panes([2, 3])
+table.dataframe(
     [e.row() for e in entries],
     key="hist_table",
     on_select=select,
@@ -152,10 +145,13 @@ st.dataframe(
         "Seconds": st.column_config.NumberColumn(format="%.0f"),
         "Starred": st.column_config.CheckboxColumn(),
     },
+    width="stretch",
+    height=320 if components.stacked() else 480,  # stacked, the detail sits below the table
     placeholder="-",
     alt="Pipeline runs, newest first",
 )
-if selected is None:
-    st.caption("Select a run to see its images, prompts, guard verdicts, timings and log.")
-else:
-    show_run(selected)
+with detail:
+    if selected is None:
+        st.caption("Select a run to see its images, prompts, guard verdicts, timings and log.")
+    else:
+        show_run(selected)

@@ -1,8 +1,9 @@
 """Generate page (PLAN.md §5.6): the form, live status while a job runs, and the candidates.
 
 Submitting runs in the button's callback, before the script, so the same rerun already shows
-the form disabled. The results fragment polls the job once a second only while it runs, and
-reruns the page when it ends so the form comes back. Errors get their §5.11 banner, one-click
+the form disabled. Two fragments, the status under the form and the candidates beside it (§5.6),
+poll the job once a second only while it runs, and rerun the page when it ends so the form comes
+back. Errors get their §5.11 banner, one-click
 cheaper retries, and the run's log.
 
 Rewrite, then edit (§5.6): **Rewrite only** runs a short `rewrite_only` job; its result fills the
@@ -21,7 +22,6 @@ from qwi.ui.jobs import Busy, JobSnapshot
 
 SIZES = [512, 768, 1024]
 GUARD_MODES = ["strict", "default", "loose"]
-CARD_WIDTH = 384  # px: the "M" thumbnail, 768 device pixels on Retina (§5.6); sizes come in M5c
 
 EDIT_KEYS = ("gen_edit", "gen_edit_result", "gen_edit_verdicts")  # the editable rewrite
 
@@ -111,36 +111,6 @@ def retry(request: GenerateRequest, kind: str) -> None:
         st.session_state.gen_notice = "A run is already in progress."
 
 
-def show_candidates(run: view.RunView, prompt: str, running: bool) -> None:
-    if not run.candidates:
-        return
-    with st.container(horizontal=True, gap="medium"):
-        for c in run.candidates:
-            with st.container(border=True, width=CARD_WIDTH):
-                st.image(
-                    str(c.path),
-                    width="stretch",
-                    output_format="PNG",  # shown as saved, not re-encoded as JPEG
-                    alt=f"{prompt} (seed {c.seed})",
-                )
-                caption = (
-                    c.caption if c.prob is not None or running else f"{c.caption} · not ranked"
-                )
-                st.caption(caption)
-                with st.container(horizontal=True, vertical_alignment="center"):
-                    if c.best:
-                        st.badge("Best", color="violet", icon=":material/star:")
-                    st.download_button(
-                        "Download",
-                        data=c.path.read_bytes,
-                        file_name=f"{run.run_dir.name if run.run_dir else 'qwi'}_{c.path.name}",
-                        mime="image/png",
-                        on_click="ignore",
-                        icon=":material/download:",
-                        key=f"download_{c.path}",
-                    )
-
-
 def show_error(snap: JobSnapshot, run: view.RunView) -> None:
     """The §5.11 banner for the error class, its one-click retries, and where to look next."""
     banner = view.error_banner(snap)
@@ -173,12 +143,6 @@ def show_outcome(snap: JobSnapshot, run: view.RunView) -> None:
     elif run.status == "cancelled":
         st.info(f"Cancelled after {len(run.candidates)} of {run.n} candidates.", title="Cancelled")
     show_error(snap, run)
-    if run.low_confidence and run.rerank is not None:
-        best = max(run.rerank.probs)
-        st.warning(
-            f"The best candidate's probability is {best:.2f}, below {run.rerank.min_score}.",
-            title="No candidate clearly matched the prompt",
-        )
 
 
 snapshot = jobs.snapshot()
@@ -186,19 +150,20 @@ busy = snapshot is not None and snapshot.running
 load_rewrite(snapshot)
 
 
-@st.fragment(run_every="1s" if busy else None)
-def results() -> None:
-    snap = jobs.snapshot()
-    if snap is None:
-        st.caption("Results appear here.")
-        return
-    if snap.running != busy:  # it started or ended since the page ran: update the form too
+def follow(snap: JobSnapshot | None) -> None:
+    """Rerun the page when a job started or ended since it ran, so the form follows."""
+    if snap is not None and snap.running != busy:
         st.rerun()
+
+
+@st.fragment(run_every="1s" if busy else None)
+def job_status() -> None:
+    """Under the form: stages, progress, Cancel, guard and swap notices, the rewrite, outcome."""
+    snap = jobs.snapshot()
+    follow(snap)
+    if snap is None:
+        return
     run = view.summarize(snap)
-    for stage in run.stages:
-        st.status(stage.label, state=stage.state)
-    if run.progress is not None:
-        st.progress(run.progress.fraction, text=run.progress.text)
     if snap.running:
         cancelling = snap.request.cancel.is_set()
         st.button(
@@ -207,6 +172,10 @@ def results() -> None:
             on_click=cancel,
             disabled=cancelling,
         )
+    for stage in run.stages:
+        st.status(stage.label, state=stage.state)
+    if run.progress is not None:
+        st.progress(run.progress.fraction, text=run.progress.text)
     for verdict in run.warnings:
         st.warning(verdict.summary, title="Guard warning")
     for risk in run.swap_risks:
@@ -220,17 +189,58 @@ def results() -> None:
         if snap.status == "ok":
             st.caption("The rewrite is ready to edit under **Prompt to generate**.")
     elif run.rewrite is not None:
-        with st.expander("Rewritten prompt"):
-            st.code(run.rewrite.text, language=None, wrap_lines=True)
+        components.long_text("Rewritten prompt", run.rewrite.text)
         if run.rewrite.fallback_reason:
             st.caption(f"Generated from your prompt instead: {run.rewrite.fallback_reason}")
     show_outcome(snap, run)
-    show_candidates(run, snap.request.prompt, snap.running)
 
 
-left, right = st.columns([1, 2], gap="large")
-with left, st.form("generate", border=False):
+@st.fragment(run_every="1s" if busy else None)
+def gallery() -> None:
+    """Beside the form: the candidates as they arrive, and the low-confidence warning."""
+    snap = jobs.snapshot()
+    follow(snap)
+    if snap is None:
+        st.caption("Results appear here.")
+        return
+    run = view.summarize(snap)
+    if run.low_confidence and run.rerank is not None:
+        best = max(run.rerank.probs)
+        st.warning(
+            f"The best candidate's probability is {best:.2f}, below {run.rerank.min_score}.",
+            title="No candidate clearly matched the prompt",
+        )
+    if run.candidates:
+        components.candidate_grid(
+            run.candidates,
+            components.thumb_width(),
+            prompt=snap.request.prompt,
+            name=run.run_dir.name if run.run_dir else "qwi",
+            running=snap.running,
+        )
+
+
+left, right = components.panes([1, 2])
+with left, components.reading():
+    form = st.form("generate", border=False)
+    job_status()
+with form:
     st.text_area("Prompt", key="gen_prompt", height=140, placeholder="Describe the image")
+    # Right under the prompt, so they stay in reach without scrolling (§5.6).
+    with st.container(horizontal=True):
+        st.form_submit_button(
+            "Generate",
+            type="primary",
+            icon=":material/auto_awesome:",
+            on_click=submit,
+            disabled=busy,
+        )
+        st.form_submit_button(
+            "Rewrite only",
+            icon=":material/edit_note:",
+            on_click=rewrite_only,
+            disabled=busy,
+        )
     with st.container(horizontal=True):
         st.number_input("Candidates", min_value=1, max_value=8, value=DEFAULTS.n, key="gen_n")
         st.number_input("Steps", min_value=1, max_value=100, value=DEFAULTS.steps, key="gen_steps")
@@ -254,20 +264,6 @@ with left, st.form("generate", border=False):
         "Guard mode", GUARD_MODES, default=DEFAULTS.guard_mode, required=True, key="gen_guard"
     )
     st.toggle("Rewrite the prompt", value=True, key="gen_rewrite")
-    with st.container(horizontal=True):
-        st.form_submit_button(
-            "Generate",
-            type="primary",
-            icon=":material/auto_awesome:",
-            on_click=submit,
-            disabled=busy,
-        )
-        st.form_submit_button(
-            "Rewrite only",
-            icon=":material/edit_note:",
-            on_click=rewrite_only,
-            disabled=busy,
-        )
     if (result := st.session_state.get("gen_edit_result")) is not None:
         st.divider()
         for verdict in st.session_state.gen_edit_verdicts:
@@ -291,4 +287,4 @@ with left, st.form("generate", border=False):
         st.warning(notice)
 
 with right:
-    results()
+    gallery()
