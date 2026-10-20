@@ -147,3 +147,12 @@ def test_ui_code_has_no_css_and_no_hex_colors() -> None:
         if re.search(r"#[0-9A-Fa-f]{6}\b", text):
             offenders.append(f"{path.name}: hex color")
     assert offenders == []
+
+
+def test_server_never_watches_files() -> None:
+    """The watcher's `sys.modules` scan prints a torch traceback per transformers alias (§8)."""
+    from streamlit import config
+
+    server = tomllib.loads(CONFIG.read_text(encoding="utf-8"))["server"]
+    assert server["fileWatcherType"] == "none"
+    assert "server.fileWatcherType" in config._config_options_template
