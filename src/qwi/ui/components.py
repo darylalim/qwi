@@ -19,7 +19,12 @@ from qwi.ui.jobs import JobManager
 from qwi.ui.status import StatusLine
 from qwi.ui.view import CandidateView
 
-THUMB_SIZES = DEFAULTS.thumb_sizes  # Thumbnail size → card width in px
+THUMB_SIZES = DEFAULTS.thumb_sizes  # Thumbnail size → image width in px
+# A bordered container's padding and border, measured in Chrome (§8 2026-10-19): a 384 px card
+# showed a 352 px image. Cards add it so the image itself is the thumbnail width.
+FRAME = 32
+LONG_TEXT_HEIGHT = 320  # px: about 14 wrapped lines at the reading width
+LONG_TEXT_CHARS = 1000  # shorter text gets its own height instead of a mostly empty box
 
 
 def job_manager() -> JobManager:
@@ -96,25 +101,26 @@ def reading() -> DeltaGenerator:
 
 def long_text(label: str, text: str) -> None:
     """Long or variable text (a rewrite of up to 500 words) collapsed, at a bounded height."""
+    height = LONG_TEXT_HEIGHT if len(text) > LONG_TEXT_CHARS else "content"
     with st.expander(label):
-        st.code(text, language=None, wrap_lines=True, height=320)
+        st.code(text, language=None, wrap_lines=True, height=height)
 
 
 @st.dialog("Full view", width="large")
 def full_view_dialog(c: CandidateView, alt: str) -> None:
-    """The image at its native size, capped by the dialog, so inspection works on every screen."""
-    st.image(str(c.path), width="content", output_format="PNG", alt=alt)
+    """The image larger than its card and still inside a laptop window, the caption in view."""
+    st.image(str(c.path), width=DEFAULTS.full_view_width, output_format="PNG", alt=alt)
     st.caption(c.caption)
 
 
 def candidate_card(
     c: CandidateView, width: int, *, alt: str, name: str, running: bool = False
 ) -> None:
-    """One bordered card: image, caption, Best badge, View and Download.
+    """One bordered card around an image `width` px wide: caption, Best badge, View, Download.
 
     `name` prefixes the download's file name (the run folder); `running` says a missing score is
     still to come rather than never coming."""
-    with st.container(border=True, width=width):
+    with st.container(border=True, width=width + FRAME):
         if not c.path.exists():
             st.caption(f"{c.path.name} is missing")
             return
@@ -146,6 +152,8 @@ def candidate_grid(
     cands: Sequence[CandidateView], width: int, *, prompt: str, name: str, running: bool = False
 ) -> None:
     """Cards in seed order, as many per row as fit, so positions stay put while results stream."""
-    with st.container(horizontal=True, gap="medium"):
+    # "small" (16 px), not "medium" (32 px): two framed M cards then fit a 1512 px window's
+    # gallery pane with the sidebar collapsed (848 of 862 px), where "medium" missed by 2 px.
+    with st.container(horizontal=True, gap="small"):
         for c in cands:
             candidate_card(c, width, alt=f"{prompt} (seed {c.seed})", name=name, running=running)
