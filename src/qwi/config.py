@@ -56,6 +56,12 @@ class Defaults:
     # Streamlit ports: the main UI and the eval review app run side by side (PLAN.md §5.6).
     ui_port: int = 8501
     review_port: int = 8502
+    # UI card widths per Thumbnail size (PLAN.md §5.6): M = 384 CSS px is 768 device pixels on a
+    # Retina display, the native image width, so the default thumbnail is pixel-exact.
+    thumb_sizes: dict[str, int] = field(default_factory=lambda: {"S": 256, "M": 384, "L": 512})
+    thumb_size: str = "M"
+    # Reading-heavy blocks (forms, prompts) never get wider than this, in CSS px (§5.6).
+    reading_width: int = 760
     # The UI's one-click retries after a memory error: the cheaper settings §5.11 suggests.
     retry_size: int = 512
     retry_n: int = 2

@@ -19,3 +19,11 @@ def test_disk_rule_matches_plan_section_5_7() -> None:
 
 def test_eval_seeds_match_plan_section_5_4() -> None:
     assert DEFAULTS.eval_seeds == (1000, 1001)
+
+
+def test_thumbnail_sizes_match_plan_section_5_6() -> None:
+    assert DEFAULTS.thumb_sizes == {"S": 256, "M": 384, "L": 512}
+    assert DEFAULTS.thumb_size == "M"
+    # M is pixel-exact on Retina (2 device px per CSS px) only at the native image width.
+    assert DEFAULTS.thumb_sizes[DEFAULTS.thumb_size] * 2 == DEFAULTS.width
+    assert DEFAULTS.reading_width == 760

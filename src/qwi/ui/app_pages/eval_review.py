@@ -16,7 +16,7 @@ import streamlit as st
 
 from qwi import bestof, sessions, variant_review
 from qwi.errors import SessionError
-from qwi.ui import review
+from qwi.ui import components, review
 from qwi.ui.review import Source
 
 HINT_LABELS = {
@@ -29,6 +29,9 @@ HINT_LABELS = {
     "seconds": "Seconds",
 }
 OPEN_ERRORS = (SessionError, OSError, KeyError, ValueError)
+# Fixed sizes, not the sidebar's Thumbnail size: every item is judged at the same scale (§5.6).
+PAIR_WIDTH = components.THUMB_SIZES["M"]
+VARIANT_WIDTH = components.THUMB_SIZES["L"]
 
 
 def move(key: str, step: int, total: int) -> None:
@@ -69,11 +72,13 @@ def toolbar(source: Source, judged: Sequence[bool], unit: str, units: str) -> in
     return index
 
 
-def show_image(image: Path, alt: str) -> None:
-    if image.is_file():
-        st.image(str(image), width="stretch", alt=alt)
-    else:
-        st.warning(f"`{image}`", title="Image not found")
+def show_image(image: Path, alt: str, width: int) -> None:
+    """The image at `width` px, or less when its pane is narrower."""
+    with st.container(width=width):
+        if image.is_file():
+            st.image(str(image), width="stretch", alt=alt)
+        else:
+            st.warning(f"`{image}`", title="Image not found")
 
 
 def show_hints(hints: dict) -> None:
@@ -94,17 +99,17 @@ def show_paired(source: Source) -> None:
     item = session.items[index]
     judgment = judgments.get(item.item) or sessions.Judgment({}, {})
 
-    image_left, image_right, form_column = st.columns([1, 1, 1], gap="large")
+    image_left, image_right, form_column = components.panes([1, 1, 1])
     for column, side in ((image_left, "left"), (image_right, "right")):
         shown = session.sides[(item.item, side)]
         with column:
             st.subheader(side.capitalize())
-            show_image(shown.image, f"{side.capitalize()}: {shown.prompt}")
+            show_image(shown.image, f"{side.capitalize()}: {shown.prompt}", PAIR_WIDTH)
             if judged(item):  # hints only after the pair is saved (§5.4)
                 with st.expander("Hints"):
                     show_hints(shown.hints)
 
-    with form_column:
+    with form_column, components.reading():
         st.markdown(f"**Prompt:** {session.sides[(item.item, 'left')].prompt}")
         with st.form(key=f"form-{item.item}", border=False):
             for n, check in enumerate(item.checks):
@@ -158,18 +163,21 @@ def show_bestof(source: Source) -> None:
     st.markdown(f"**Prompt:** {prompt}")
 
     with st.form(key=f"form-{item.item}", border=False):
-        columns = st.columns(len(item.seeds), gap="medium")
-        for column, n in zip(columns, item.candidates, strict=True):
-            with column:
-                st.subheader(f"Candidate {n}")
-                show_image(session.images[(item.item, n)], f"Candidate {n}: {prompt}")
-                st.segmented_control(
-                    "Acceptable",
-                    bestof.ACCEPTABLE,
-                    default=judgment.acceptable.get(n) or None,
-                    format_func=str.capitalize,
-                    key=f"{item.item}-{n}-acceptable",
-                )
+        # Up to N candidates: a wrapping row, not N columns (§5.6 allows 3 per row).
+        with st.container(horizontal=True, gap="medium"):
+            for n in item.candidates:
+                with st.container(width=PAIR_WIDTH):
+                    st.subheader(f"Candidate {n}")
+                    show_image(
+                        session.images[(item.item, n)], f"Candidate {n}: {prompt}", PAIR_WIDTH
+                    )
+                    st.segmented_control(
+                        "Acceptable",
+                        bestof.ACCEPTABLE,
+                        default=judgment.acceptable.get(n) or None,
+                        format_func=str.capitalize,
+                        key=f"{item.item}-{n}-acceptable",
+                    )
         st.segmented_control(
             "Best",
             list(item.candidates),
@@ -210,10 +218,10 @@ def show_variant(source: Source) -> None:
     item = results.items[index]
     judgment = judgments.get(item.item) or variant_review.VariantJudgment({})
 
-    image_column, form_column = st.columns([1, 1], gap="large")
+    image_column, form_column = components.panes([1, 1])
     with image_column:
-        show_image(item.image, item.prompt)
-    with form_column:
+        show_image(item.image, item.prompt, VARIANT_WIDTH)
+    with form_column, components.reading():
         st.markdown(f"**Prompt:** {item.prompt}")
         st.caption(f"`{item.prompt_id}` · seed {item.seed}")
         show_hints(item.hints)
@@ -254,7 +262,7 @@ if not found:
         title="Nothing to review yet",
     )
     st.stop()
-picked = st.selectbox(
+picked = components.reading().selectbox(
     "Review",
     list(by_key),
     index=None,

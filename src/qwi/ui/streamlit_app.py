@@ -35,6 +35,7 @@ page = st.navigation(
         ),
     ]
 )
+components.layout_controls()  # before the page runs: every page reads them
 components.doctor_status()
 st.sidebar.caption(f"qwi {version('qwi')}")
 page.run()

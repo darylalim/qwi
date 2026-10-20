@@ -228,7 +228,7 @@ def test_the_first_item_shows_two_unlabeled_images(
     assert at.button(key="previous").disabled
     assert [img.proto.imgs[0].alt for img in at.image] == [f"Left: {prompt}", f"Right: {prompt}"]
     assert [h.value for h in at.subheader] == ["Left", "Right"]
-    assert len(at.segmented_control) == 2 * len(item.checks) + 1  # + prefer
+    assert len(at.main.segmented_control) == 2 * len(item.checks) + 1  # + prefer
     assert at.progress[0].value == 0
 
 
@@ -314,7 +314,7 @@ def test_a_best_of_prompt_shows_its_candidates_and_nothing_else(
         f"Candidate {n}: {prompt}" for n in item.candidates
     ]
     assert [h.value for h in at.subheader] == [f"Candidate {n}" for n in item.candidates]
-    assert len(at.segmented_control) == 4 + 1  # acceptable per candidate, then best
+    assert len(at.main.segmented_control) == 4 + 1  # acceptable per candidate, then best
     shown = texts(at)
     assert not any(str(s) in shown for s in SEEDS)  # no seeds ...
     assert "0.9" not in shown  # ... and no reranker scores
@@ -370,7 +370,7 @@ def test_an_image_shows_with_its_hints_in_view(results: Path) -> None:
     assert "Image 1 of 24" in texts(at)
     assert [img.proto.imgs[0].alt for img in at.image] == [item.prompt]
     assert f"gamma rewrite of {item.prompt_id}" in texts(at)  # nothing here is blind
-    assert [c.label for c in at.segmented_control] == list(item.checks)
+    assert [c.label for c in at.main.segmented_control] == list(item.checks)
     assert at.progress[0].value == 0
 
 
