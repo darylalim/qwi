@@ -27,3 +27,9 @@ def test_thumbnail_sizes_match_plan_section_5_6() -> None:
     # M is pixel-exact on Retina (2 device px per CSS px) only at the native image width.
     assert DEFAULTS.thumb_sizes[DEFAULTS.thumb_size] * 2 == DEFAULTS.width
     assert DEFAULTS.reading_width == 760
+
+
+def test_full_view_fits_a_laptop_window() -> None:
+    # 1.5x M; with the dialog's 146 px of chrome and 48 px margin it fits 779 px (§8 2026-10-19).
+    assert DEFAULTS.full_view_width == DEFAULTS.thumb_sizes["M"] * 3 // 2 == 576
+    assert DEFAULTS.full_view_width + 146 + 48 <= 779

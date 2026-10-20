@@ -73,8 +73,9 @@ def toolbar(source: Source, judged: Sequence[bool], unit: str, units: str) -> in
 
 
 def show_image(image: Path, alt: str, width: int) -> None:
-    """The image at `width` px, or less when its pane is narrower."""
-    with st.container(width=width):
+    """The image at `width` px, or less when its pane is narrower, framed so a white image
+    stays distinct from the light theme's background."""
+    with st.container(width=width + components.FRAME, border=True):
         if image.is_file():
             st.image(str(image), width="stretch", alt=alt)
         else:
@@ -164,9 +165,9 @@ def show_bestof(source: Source) -> None:
 
     with st.form(key=f"form-{item.item}", border=False):
         # Up to N candidates: a wrapping row, not N columns (§5.6 allows 3 per row).
-        with st.container(horizontal=True, gap="medium"):
+        with st.container(horizontal=True, gap="small"):  # as the candidate grid
             for n in item.candidates:
-                with st.container(width=PAIR_WIDTH):
+                with st.container(width=PAIR_WIDTH + components.FRAME):
                     st.subheader(f"Candidate {n}")
                     show_image(
                         session.images[(item.item, n)], f"Candidate {n}: {prompt}", PAIR_WIDTH

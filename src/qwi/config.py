@@ -62,6 +62,9 @@ class Defaults:
     thumb_size: str = "M"
     # Reading-heavy blocks (forms, prompts) never get wider than this, in CSS px (§5.6).
     reading_width: int = 760
+    # The full-view dialog's image width, 1.5x M. The dialog adds 146 px (title, caption, padding)
+    # below a 48 px top margin, so 576 fits a 779 px-tall viewport; 768 and 640 didn't (§8).
+    full_view_width: int = 576
     # The UI's one-click retries after a memory error: the cheaper settings §5.11 suggests.
     retry_size: int = 512
     retry_n: int = 2
