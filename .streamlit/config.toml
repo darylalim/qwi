@@ -4,6 +4,7 @@
 address = "localhost"     # never expose on the LAN: it's a local, single-user tool
 headless = true
 runOnSave = false
+fileWatcherType = "none"  # no reruns on edit, and its module scan trips transformers' torch-only aliases (§8)
 
 [browser]
 gatherUsageStats = false
