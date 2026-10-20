@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from PIL.Image import Image
 
-from qwi import memory
+from qwi import memory, quiet
 from qwi.config import DEFAULTS
 from qwi.stages.encode import PromptEmbeds
 
@@ -51,8 +51,10 @@ class Generate:
         self._model: QwenImage21 | None = None
 
     def load(self) -> None:
+        from mflux.models.common.config import config as mflux_config
         from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
+        quiet.silence_tqdm(mflux_config)  # its per-image bar; the pipeline reports steps (§9)
         memory.configure()
         model = QwenImage21(model_path=str(self.model_path))
         for callback in self.callbacks:

@@ -6,3 +6,8 @@ import os
 # before any qwi module can import it. Forced, not defaulted, so a stray shell value can't
 # start a multi-GB download mid-run.
 os.environ["HF_HUB_OFFLINE"] = "1"
+
+# Before any qwi module can import transformers, whose torch-free import warns once (§9).
+from qwi import quiet
+
+quiet.install()
