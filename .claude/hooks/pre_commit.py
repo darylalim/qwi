@@ -12,6 +12,7 @@ from _common import project_dir, read_payload, run, run_gates, toolchain_missing
 MAX_BYTES = 5 * 1024 * 1024
 WEIGHT_SUFFIXES = {".safetensors", ".gguf", ".npz"}
 COMMIT_RE = re.compile(r"\bgit\b[^;&|\n]*\bcommit\b")
+IMAGE_DIRS = ("tests/fixtures/", "docs/screenshots/")
 
 
 def is_commit(command: str) -> bool:
@@ -30,8 +31,8 @@ def file_problems(files: list[tuple[str, int]]) -> list[str]:
             problems.append(f"{name}: model weights are never committed (§5.7)")
         if path.parts and path.parts[0] == "var":
             problems.append(f"{name}: var/ is runtime data ($QWI_HOME)")
-        if path.suffix.lower() == ".png" and not name.startswith("tests/fixtures/"):
-            problems.append(f"{name}: images are only allowed under tests/fixtures/")
+        if path.suffix.lower() == ".png" and not name.startswith(IMAGE_DIRS):
+            problems.append(f"{name}: images are only allowed under {' and '.join(IMAGE_DIRS)}")
     return problems
 
 
