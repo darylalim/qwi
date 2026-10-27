@@ -32,6 +32,8 @@ var/
 # ...except small committed test fixtures
 !tests/fixtures/**/*.png
 !tests/fixtures/**/*.jpg
+# ...and the README screenshots
+!docs/screenshots/*.png
 
 # --- Secrets / local settings ---
 .env

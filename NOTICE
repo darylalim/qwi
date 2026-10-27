@@ -14,3 +14,6 @@ for a template snapshot test.
 
 tests/fixtures/rerank/red_cube.png was generated with Qwen-Image-2.1 and is therefore
 under the Qwen Research License (research and non-commercial use), not Apache-2.0.
+
+The images in docs/screenshots/ show candidates generated with Qwen-Image-2.1 and are
+likewise under the Qwen Research License, not Apache-2.0.

@@ -76,6 +76,7 @@ def test_pre_commit_file_rules() -> None:
     files = [
         ("src/qwi/cli.py", 100),
         ("tests/fixtures/ok.png", 100),
+        ("docs/screenshots/generate.png", 100),
         ("big.bin", 6 * 1024 * 1024),
         ("weights/model.safetensors", 10),
         ("q.GGUF", 10),
